@@ -1,0 +1,12 @@
+{
+  "explorer.excludeGitIgnore": false,
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*_cache": true,
+    "**/.venv": true
+  },
+  "python.analysis.exclude": [
+    "references",
+    ".venv"
+  ]
+}

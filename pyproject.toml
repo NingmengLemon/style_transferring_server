@@ -1,0 +1,49 @@
+[project]
+name = "style-transferring-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139.0",
+    "numpy>=2.5.1",
+    "opencv-python>=5.0.0.93",
+    "torch>=2.12.1",
+    "torchvision>=0.27.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch_cu130" }
+torchaudio = { index = "pytorch_cu130" }
+torchvision = { index = "pytorch_cu130" }
+
+[[tool.uv.index]]
+name = "ustc"
+url = "https://mirrors.ustc.edu.cn/pypi/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch_cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch_cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch_cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch_cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
+
+[tool.uv]
+package = true
