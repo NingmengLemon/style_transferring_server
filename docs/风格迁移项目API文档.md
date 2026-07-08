@@ -1,1135 +1,641 @@
-\# 个性化数字艺术创作系统 HTTP API 文档
+# 风格迁移项目 HTTP API 文档
 
-\## 1. 项目说明
+> 项目：基于图像风格迁移的个性化数字艺术创作系统设计与实现  
+> 服务端：FastAPI + PyTorch + VGG19 神经风格迁移  
+> 客户端：HarmonyOS ArkTS App 或其他 HTTP 客户端
 
-项目名称：
+## 1. 文档说明
 
-> 基于图像风格迁移的个性化数字艺术创作系统设计与实现
+本文档用于客户端与 Python 后端联调，描述当前服务端已经提供的 HTTP 接口、请求参数、响应结构、错误码和典型调用流程。
 
-系统采用客户端-服务端分离架构：
+当前后端采用前后端分离架构：
 
+```text
+HarmonyOS ArkTS App / Web / 其他客户端
+        |
+        | HTTP
+        v
+Python FastAPI 服务
+        |
+        | PyTorch + VGG19
+        v
+神经风格迁移结果图像
 ```
 
-HarmonyOS ArkTS App
+### 1.1 客户端职责
 
-&#x20;       |
+- 选择或拍摄内容图像。
+- 获取后端支持的艺术风格列表。
+- 选择风格并调整风格迁移参数。
+- 调用风格迁移接口上传图片。
+- 展示后端返回的生成图片。
+- 下载或本地保存历史作品。
 
-&#x20;       | HTTP
+### 1.2 服务端职责
 
-&#x20;       |
+- 维护可用风格列表与风格预览图。
+- 接收内容图像和参数。
+- 校验图片格式、大小、尺寸与参数范围。
+- 使用 VGG19 执行神经风格迁移。
+- 保存生成结果图片。
+- 返回生成图片访问地址与实际使用参数。
 
-Python FastAPI + PyTorch
+## 2. 基础信息
 
-&#x20;       |
+### 2.1 服务地址
 
-&#x20;       |
+开发环境默认监听：
 
-VGG Neural Style Transfer
-
-```
-
-\### 客户端职责
-
-\* 用户图片选择
-
-\* 风格选择
-
-\* 参数调整
-
-\* 调用风格迁移接口
-
-\* 展示生成结果
-
-\* 下载图片
-
-\* 本地保存历史作品
-
-\### Python 服务端职责
-
-\* 加载 VGG 风格迁移模型
-
-\* 接收图片和参数
-
-\* 执行图像风格迁移
-
-\* 保存生成图片
-
-\* 返回生成结果地址
-
-\---
-
-\# 2. 基础信息
-
-\## 服务地址
-
-开发环境：
-
-```
-
+```text
 http://<server-ip>:8000
-
 ```
 
-例如：
+本机调试示例：
 
+```text
+http://127.0.0.1:8000
 ```
 
+局域网真机调试示例：
+
+```text
 http://192.168.1.100:8000
-
 ```
 
-\---
+实际地址由服务端运行环境决定，默认端口为 `8000`。
 
-\## 请求格式
+### 2.2 接口前缀
 
-普通 JSON 请求：
+业务接口统一使用 `/api` 前缀：
 
+```text
+/api/health
+/api/styles
+/api/style-transfer
 ```
 
-Content-Type: application/json
+静态资源通过 `/static` 访问：
 
+```text
+/static/styles/{style_id}.jpg
+/static/results/{result_file}.png
 ```
 
-图片上传请求：
+### 2.3 请求类型
 
-```
+| 场景 | Content-Type | 说明 |
+| --- | --- | --- |
+| 普通查询接口 | `application/json` 或无请求体 | 例如健康检查、风格列表 |
+| 图片上传接口 | `multipart/form-data` | 用于上传图片和表单参数 |
 
-Content-Type: multipart/form-data
+### 2.4 跨域策略
 
-```
+当前服务端允许跨域访问，便于 App、Web 或其他客户端联调。
 
-\---
+## 3. 统一响应格式
 
-\# 3. 统一响应格式
+所有业务接口返回统一 JSON 结构。
 
-所有接口统一返回：
-
-\## 成功
+### 3.1 成功响应
 
 ```json
-
 {
-
-&#x20;   "code": 0,
-
-&#x20;   "message": "success",
-
-&#x20;   "data": {}
-
+  "code": 0,
+  "message": "success",
+  "data": {}
 }
-
 ```
 
-\## 失败
+### 3.2 失败响应
 
 ```json
-
 {
-
-&#x20;   "code": 1000,
-
-&#x20;   "message": "error message",
-
-&#x20;   "data": null
-
+  "code": 1000,
+  "message": "error message",
+  "data": null
 }
-
 ```
 
-字段说明：
+### 3.3 字段说明
 
-| 字段      | 类型     | 说明   |
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `code` | int | 是 | 业务状态码，`0` 表示成功 |
+| `message` | string | 是 | 响应说明或错误说明 |
+| `data` | object / null | 是 | 成功时为业务数据，失败时为 `null` |
 
-| ------- | ------ | ---- |
+## 4. 错误码
 
-| code    | int    | 状态码  |
+### 4.1 通用错误码
 
-| message | string | 描述信息 |
+| code | HTTP 状态码 | 说明 | 常见场景 |
+| --- | --- | --- | --- |
+| `0` | `200` | 请求成功 | 接口正常返回 |
+| `1000` | `400` / `500` | 通用错误或参数错误 | 表单字段缺失、类型错误、未捕获异常 |
 
-| data    | object | 返回数据 |
+> 说明：FastAPI 表单校验失败会统一映射为 `1000`，例如缺少必填的 `image` 或 `style_id` 字段。
 
-\---
+### 4.2 图片相关错误码
 
-\# 4. 状态码设计
+| code | HTTP 状态码 | 说明 | message 示例 |
+| --- | --- | --- | --- |
+| `2001` | `400` | 未上传图片或图片内容为空 | `image is required` |
+| `2002` | `400` | 图片无法读取或内容损坏 | `image cannot be read` |
+| `2003` | `415` | 图片格式不支持 | `only jpg/png/jpeg supported` |
+| `2004` | `413` | 图片超过大小限制 | `image exceeds size limit` |
+| `2005` | `400` | 图片尺寸异常 | `invalid image size` |
 
-\## 通用错误
+图片限制：
 
-| code | HTTP状态码 | 说明     |
+| 项目 | 约束 |
+| --- | --- |
+| 支持扩展名 | `jpg`、`jpeg`、`png` |
+| 支持真实格式 | JPEG、PNG |
+| 默认最大体积 | 10 MB |
+| 最小尺寸 | 宽高均不小于 16 px |
+| 最大尺寸 | 宽高均不大于 12000 px |
 
-| ---- | ------- | ------ |
+### 4.3 风格迁移相关错误码
 
-| 0    | 200     | 请求成功   |
+| code | HTTP 状态码 | 说明 | message 示例 |
+| --- | --- | --- | --- |
+| `3001` | `400` | 风格 ID 不存在 | `style not found` |
+| `3002` | `400` | 参数范围或枚举值错误 | `style_strength must between 0 and 100` |
+| `3003` | `500` | 模型加载失败 | `model loading failed` |
+| `3004` | `500` | 模型推理失败 | `style transfer failed` |
+| `3005` | `503` | GPU 显存不足 | `CUDA out of memory` |
+| `3006` | `504` | 推理超时 | `inference timeout` |
 
-| 1000 | 400     | 参数错误   |
+## 5. API 总览
 
-| 1001 | 401     | 未授权    |
+| 接口 | 方法 | Content-Type | 说明 |
+| --- | --- | --- | --- |
+| `/api/health` | GET | 无请求体 | 服务与模型状态检查 |
+| `/api/styles` | GET | 无请求体 | 获取可选艺术风格列表 |
+| `/api/style-transfer` | POST | `multipart/form-data` | 上传图片并执行风格迁移 |
+| `/static/{path}` | GET | 无请求体 | 访问风格预览图或生成结果图 |
 
-| 1002 | 404     | 资源不存在  |
+## 6. API 详情
 
-| 1003 | 405     | 请求方法错误 |
+## 6.1 健康检查
 
-| 1004 | 413     | 请求数据过大 |
-
-| 1005 | 415     | 格式不支持  |
-
-\---
-
-\## 图片相关错误
-
-| code | HTTP状态码 | 说明       |
-
-| ---- | ------- | -------- |
-
-| 2001 | 400     | 未上传图片    |
-
-| 2002 | 400     | 图片无法读取   |
-
-| 2003 | 415     | 图片格式不支持  |
-
-| 2004 | 413     | 图片超过大小限制 |
-
-| 2005 | 400     | 图片尺寸异常   |
-
-支持格式：
-
-```
-
-jpg
-
-jpeg
-
-png
-
-```
-
-建议限制：
-
-```
-
-最大 10MB
-
-```
-
-\---
-
-\## 风格迁移相关错误
-
-| code | HTTP状态码 | 说明      |
-
-| ---- | ------- | ------- |
-
-| 3001 | 400     | 风格ID不存在 |
-
-| 3002 | 400     | 参数范围错误  |
-
-| 3003 | 500     | 模型加载失败  |
-
-| 3004 | 500     | 模型推理失败  |
-
-| 3005 | 503     | GPU资源不足 |
-
-| 3006 | 504     | 推理超时    |
-
-\---
-
-\# 5. API列表
-
-| 接口                  | 方法   | 说明     |
-
-| ------------------- | ---- | ------ |
-
-| /api/health         | GET  | 服务状态检查 |
-
-| /api/styles         | GET  | 获取风格列表 |
-
-| /api/style-transfer | POST | 执行风格迁移 |
-
-| /static/\*           | GET  | 访问生成图片 |
-
-\---
-
-\# API 1：健康检查
-
-\## GET /api/health
-
-\### 功能
-
-检查 Python 后端服务和模型状态。
-
-\---
-
-\## 请求
+### 基本信息
 
 ```http
-
 GET /api/health
-
 ```
 
-\---
+用于检查后端服务是否可用，以及 VGG19 模型是否已经加载成功。
 
-\## 响应
+### 请求参数
 
-成功：
+无。
+
+### 成功响应
 
 ```json
-
 {
-
-&#x20;   "code":0,
-
-&#x20;   "message":"success",
-
-&#x20;   "data":{
-
-&#x20;       "status":"running",
-
-&#x20;       "model\_loaded":true,
-
-&#x20;       "device":"cuda"
-
-&#x20;   }
-
+  "code": 0,
+  "message": "success",
+  "data": {
+    "status": "running",
+    "model_loaded": true,
+    "device": "cuda"
+  }
 }
-
 ```
 
-字段：
+### data 字段说明
 
-| 字段           | 说明     |
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `status` | string | 服务运行状态，正常为 `running` |
+| `model_loaded` | boolean | 模型是否已成功加载 |
+| `device` | string | 推理设备，例如 `cuda` 或 `cpu` |
 
-| ------------ | ------ |
-
-| status       | 服务运行状态 |
-
-| model\_loaded | 模型是否加载 |
-
-| device       | 运行设备   |
-
-\---
-
-\## 失败
+### 失败响应示例
 
 模型加载失败：
 
 ```json
-
 {
-
-&#x20;   "code":3003,
-
-&#x20;   "message":"model loading failed",
-
-&#x20;   "data":null
-
+  "code": 3003,
+  "message": "model loading failed",
+  "data": null
 }
-
 ```
 
-\---
+## 6.2 获取风格列表
 
-\# API 2：获取风格列表
-
-\## GET /api/styles
-
-\### 功能
-
-获取系统支持的艺术风格。
-
-风格来源：
-
-```
-
-WikiArt Dataset
-
-```
-
-\---
-
-\## 请求
+### 基本信息
 
 ```http
-
 GET /api/styles
-
 ```
 
-\---
+用于获取服务端当前可用的艺术风格。风格图来源于 WikiArt 数据集，并由服务端生成静态预览图。
 
-\## 返回
+### 请求参数
+
+无。
+
+### 成功响应
 
 ```json
-
 {
-
-&#x20;   "code":0,
-
-&#x20;   "message":"success",
-
-&#x20;   "data":{
-
-&#x20;       "styles":\[
-
-&#x20;           {
-
-&#x20;               "style\_id":"vangogh",
-
-&#x20;               "name":"梵高星空",
-
-&#x20;               "artist":"Vincent van Gogh",
-
-&#x20;               "description":"旋涡笔触和高饱和色彩风格",
-
-&#x20;               "preview\_url":
-
-&#x20;               "/static/styles/vangogh.jpg"
-
-&#x20;           },
-
-&#x20;           {
-
-&#x20;               "style\_id":"picasso",
-
-&#x20;               "name":"毕加索立体主义",
-
-&#x20;               "artist":"Pablo Picasso",
-
-&#x20;               "description":"几何分解和抽象结构风格",
-
-&#x20;               "preview\_url":
-
-&#x20;               "/static/styles/picasso.jpg"
-
-&#x20;           }
-
-&#x20;       ]
-
-&#x20;   }
-
+  "code": 0,
+  "message": "success",
+  "data": {
+    "styles": [
+      {
+        "style_id": "vangogh",
+        "name": "梵高星空",
+        "artist": "Vincent van Gogh",
+        "description": "后印象派旋涡笔触和高饱和色彩风格",
+        "preview_url": "/static/styles/vangogh.jpg"
+      },
+      {
+        "style_id": "picasso",
+        "name": "毕加索立体主义",
+        "artist": "Pablo Picasso",
+        "description": "几何分解、平面化与抽象结构风格",
+        "preview_url": "/static/styles/picasso.jpg"
+      }
+    ]
+  }
 }
-
 ```
 
-\---
+### data 字段说明
 
-\## 返回字段
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `styles` | array | 可用风格列表 |
 
-| 字段          | 类型     | 说明     |
+### styles 数组元素说明
 
-| ----------- | ------ | ------ |
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `style_id` | string | 风格唯一 ID，调用风格迁移接口时使用 |
+| `name` | string | 风格中文名称 |
+| `artist` | string | 艺术家名称 |
+| `description` | string | 风格描述 |
+| `preview_url` | string | 风格预览图相对 URL |
 
-| style\_id    | string | 风格唯一编号 |
+### 当前内置候选风格
 
-| name        | string | 风格名称   |
+服务端会根据本地 WikiArt 数据集实际可用文件加载风格，因此最终返回列表以接口结果为准。候选风格包括：
 
-| artist      | string | 艺术家    |
+| style_id | 名称 | 艺术家 |
+| --- | --- | --- |
+| `vangogh` | 梵高星空 | Vincent van Gogh |
+| `picasso` | 毕加索立体主义 | Pablo Picasso |
+| `monet` | 莫奈印象派 | Claude Monet |
+| `kandinsky` | 康定斯基表现主义 | Wassily Kandinsky |
+| `hokusai` | 葛饰北斋浮世绘 | Katsushika Hokusai |
+| `munch` | 蒙克表现主义 | Edvard Munch |
 
-| description | string | 风格描述   |
+## 6.3 图像风格迁移
 
-| preview\_url | string | 风格预览图  |
-
-\---
-
-\# API 3：图像风格迁移
-
-\## POST /api/style-transfer
-
-\### 功能
-
-上传内容图像，并根据指定风格生成艺术作品。
-
-\---
-
-\## 请求方式
-
-```
-
-multipart/form-data
-
-```
-
-\---
-
-\## 请求参数
-
-| 参数             | 类型     | 必须 | 说明     |
-
-| -------------- | ------ | -- | ------ |
-
-| image          | file   | 是  | 内容图像   |
-
-| style\_id       | string | 是  | 风格ID   |
-
-| style\_strength | int    | 否  | 风格强度   |
-
-| content\_weight | int    | 否  | 内容保留程度 |
-
-| smoothness     | int    | 否  | 细节平滑程度 |
-
-| quality        | string | 否  | 生成质量   |
-
-\---
-
-\## 参数约束
-
-\### style\_strength
-
-范围：
-
-```
-
-0 \~ 100
-
-```
-
-默认：
-
-```
-
-70
-
-```
-
-\---
-
-\### content\_weight
-
-范围：
-
-```
-
-0 \~ 100
-
-```
-
-默认：
-
-```
-
-50
-
-```
-
-\---
-
-\### smoothness
-
-范围：
-
-```
-
-0 \~ 100
-
-```
-
-默认：
-
-```
-
-30
-
-```
-
-\---
-
-\### quality
-
-可选：
-
-```
-
-fast
-
-normal
-
-hd
-
-```
-
-默认：
-
-```
-
-fast
-
-```
-
-\---
-
-\## 请求示例
-
-```
-
-image:
-
-photo.jpg
-
-
-
-style\_id:
-
-vangogh
-
-
-
-style\_strength:
-
-80
-
-
-
-content\_weight:
-
-50
-
-
-
-smoothness:
-
-30
-
-
-
-quality:
-
-fast
-
-```
-
-\---
-
-\# 后端处理流程
-
-```
-
-接收图片
-
-
-
-↓
-
-
-
-读取style\_id
-
-
-
-↓
-
-
-
-加载对应风格图片
-
-
-
-↓
-
-
-
-图像预处理
-
-
-
-↓
-
-
-
-VGG特征提取
-
-
-
-↓
-
-
-
-计算内容损失和风格损失
-
-
-
-↓
-
-
-
-生成艺术图像
-
-
-
-↓
-
-
-
-保存结果
-
-
-
-↓
-
-
-
-返回图片地址
-
-```
-
-\---
-
-\# 成功响应
-
-```json
-
-{
-
-&#x20;   "code":0,
-
-&#x20;   "message":"success",
-
-&#x20;   "data":{
-
-&#x20;       "result\_url":
-
-&#x20;       "/static/results/result001.png",
-
-
-
-&#x20;       "time\_ms":2300,
-
-
-
-&#x20;       "parameters":{
-
-&#x20;           "style\_strength":80,
-
-&#x20;           "content\_weight":50,
-
-&#x20;           "smoothness":30,
-
-&#x20;           "quality":"fast"
-
-&#x20;       }
-
-&#x20;   }
-
-}
-
-```
-
-\---
-
-\## 返回字段
-
-| 字段         | 类型     | 说明     |
-
-| ---------- | ------ | ------ |
-
-| result\_url | string | 生成图片地址 |
-
-| time\_ms    | int    | 生成耗时   |
-
-| parameters | object | 实际使用参数 |
-
-\---
-
-\# 失败情况
-
-\## 1. 未上传图片
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":2001,
-
-&#x20;   "message":"image is required",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\## 2. 图片格式错误
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":2003,
-
-&#x20;   "message":"only jpg/png/jpeg supported",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\## 3. 风格不存在
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":3001,
-
-&#x20;   "message":"style not found",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\## 4. 参数错误
-
-例如：
-
-```
-
-style\_strength=150
-
-```
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":3002,
-
-&#x20;   "message":"style\_strength must between 0 and 100",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\## 5. 模型推理失败
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":3004,
-
-&#x20;   "message":"style transfer failed",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\## 6. GPU显存不足
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":3005,
-
-&#x20;   "message":"CUDA out of memory",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\## 7. 推理超时
-
-响应：
-
-```json
-
-{
-
-&#x20;   "code":3006,
-
-&#x20;   "message":"inference timeout",
-
-&#x20;   "data":null
-
-}
-
-```
-
-\---
-
-\# API 4：访问生成图片
-
-\## GET /static/{path}
-
-\### 功能
-
-客户端根据返回 URL 获取生成图片。
-
-例如：
+### 基本信息
 
 ```http
-
-GET /static/results/result001.png
-
+POST /api/style-transfer
+Content-Type: multipart/form-data
 ```
 
-\---
+上传一张内容图像，指定艺术风格和参数，服务端返回生成后的艺术图片 URL。
 
-\## 返回
+### 请求参数
 
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `image` | file | 是 | 无 | 内容图像文件，支持 jpg、jpeg、png |
+| `style_id` | string | 是 | 无 | 风格 ID，来自 `/api/styles` 返回值 |
+| `style_strength` | int | 否 | `70` | 风格强度，越大越接近风格图 |
+| `content_weight` | int | 否 | `50` | 内容保留权重，越大越保留原图结构 |
+| `smoothness` | int | 否 | `30` | 平滑程度，越大细节越柔和 |
+| `quality` | string | 否 | `fast` | 质量档位，可选 `fast`、`normal`、`hd` |
+
+### 参数约束
+
+| 参数 | 允许值 |
+| --- | --- |
+| `style_strength` | 0 到 100 的整数 |
+| `content_weight` | 0 到 100 的整数 |
+| `smoothness` | 0 到 100 的整数 |
+| `quality` | `fast`、`normal`、`hd` |
+
+### 质量档位说明
+
+| quality | 处理长边上限 | 迭代次数 | 说明 |
+| --- | --- | --- | --- |
+| `fast` | 384 px | 18 | 默认档位，优先保证速度 |
+| `normal` | 448 px | 22 | 平衡速度与效果 |
+| `hd` | 640 px | 40 | 高质量档，耗时可能明显增加 |
+
+> 注意：返回图片始终为 PNG 格式；输入图片会按质量档位缩放后参与推理。
+
+### 请求示例：curl
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/style-transfer" \
+  -F "image=@photo.jpg" \
+  -F "style_id=vangogh" \
+  -F "style_strength=80" \
+  -F "content_weight=50" \
+  -F "smoothness=30" \
+  -F "quality=fast"
 ```
 
-Content-Type:image/png
-
-```
-
-返回图片二进制数据。
-
-\---
-
-\# 6. 客户端本地历史作品数据结构
-
-历史记录不存储在 Python 服务端。
-
-由 HarmonyOS 本地保存。
-
-\## Work对象
+### 成功响应
 
 ```json
-
 {
-
-&#x20;   "work\_id":"work001",
-
-&#x20;   "input\_image\_path":
-
-&#x20;   "/local/input001.jpg",
-
-
-
-&#x20;   "result\_image\_path":
-
-&#x20;   "/local/result001.png",
-
-
-
-&#x20;   "style\_id":"vangogh",
-
-
-
-&#x20;   "style\_name":"梵高星空",
-
-
-
-&#x20;   "parameters":{
-
-&#x20;       "style\_strength":80,
-
-&#x20;       "content\_weight":50,
-
-&#x20;       "smoothness":30,
-
-&#x20;       "quality":"fast"
-
-&#x20;   },
-
-
-
-&#x20;   "created\_time":
-
-&#x20;   "2026-07-08 18:00:00"
-
+  "code": 0,
+  "message": "success",
+  "data": {
+    "result_url": "/static/results/result_8dfb8a6f4c0345f391f1d2d2a47c2a73.png",
+    "time_ms": 2300,
+    "parameters": {
+      "style_strength": 80,
+      "content_weight": 50,
+      "smoothness": 30,
+      "quality": "fast"
+    }
+  }
 }
-
 ```
 
-\---
+### data 字段说明
 
-\# 7. 客户端调用流程
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `result_url` | string | 生成图片的相对访问地址 |
+| `time_ms` | int | 本次处理耗时，单位毫秒 |
+| `parameters` | object | 服务端实际使用的参数 |
 
+### parameters 字段说明
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `style_strength` | int | 实际使用的风格强度 |
+| `content_weight` | int | 实际使用的内容保留权重 |
+| `smoothness` | int | 实际使用的平滑程度 |
+| `quality` | string | 实际使用的质量档位 |
+
+### 失败响应示例
+
+未上传图片或图片字段缺失：
+
+```json
+{
+  "code": 1000,
+  "message": "parameter error",
+  "data": null
+}
 ```
 
-App启动
+图片内容为空：
 
-
-
-↓
-
-
-
-GET /api/health
-
-
-
-↓
-
-
-
-GET /api/styles
-
-
-
-↓
-
-
-
-用户选择图片
-
-
-
-↓
-
-
-
-用户选择风格
-
-
-
-↓
-
-
-
-调整参数
-
-
-
-↓
-
-
-
-POST /api/style-transfer
-
-
-
-↓
-
-
-
-获取result\_url
-
-
-
-↓
-
-
-
-展示生成图片
-
-
-
-↓
-
-
-
-保存本地历史记录
-
+```json
+{
+  "code": 2001,
+  "message": "image is required",
+  "data": null
+}
 ```
 
-\---
+图片无法读取：
 
-\# 8. 联调约定
-
-\## 服务端固定：
-
-接口路径：
-
+```json
+{
+  "code": 2002,
+  "message": "image cannot be read",
+  "data": null
+}
 ```
 
-POST /api/style-transfer
+图片格式不支持：
 
+```json
+{
+  "code": 2003,
+  "message": "only jpg/png/jpeg supported",
+  "data": null
+}
 ```
 
-字段：
+风格不存在：
 
+```json
+{
+  "code": 3001,
+  "message": "style not found",
+  "data": null
+}
 ```
 
-style\_id
+参数超出范围：
 
-style\_strength
+```json
+{
+  "code": 3002,
+  "message": "style_strength must between 0 and 100",
+  "data": null
+}
+```
 
-content\_weight
+质量档位非法：
 
-smoothness
+```json
+{
+  "code": 3002,
+  "message": "quality must be fast, normal or hd",
+  "data": null
+}
+```
 
-quality
+推理超时：
 
+```json
+{
+  "code": 3006,
+  "message": "inference timeout",
+  "data": null
+}
+```
+
+## 6.4 访问静态资源
+
+### 基本信息
+
+```http
+GET /static/{path}
+```
+
+用于访问风格预览图或生成结果图。
+
+### 访问风格预览图
+
+```http
+GET /static/styles/vangogh.jpg
 ```
 
 返回：
 
+```text
+Content-Type: image/jpeg
 ```
 
-result\_url
+### 访问生成结果图
 
-time\_ms
-
-parameters
-
+```http
+GET /static/results/result_8dfb8a6f4c0345f391f1d2d2a47c2a73.png
 ```
 
-\---
+返回：
 
-\## 客户端固定：
-
-只依赖：
-
+```text
+Content-Type: image/png
 ```
 
-API地址
+## 7. 客户端推荐调用流程
 
-请求字段
-
-返回字段
-
-```
-
-\---
-
-\# 9. 最小可交付接口
-
-实际开发只需要实现：
-
-```
-
-GET  /api/health
-
-
-
-GET  /api/styles
-
-
-
+```text
+App 启动
+  |
+  v
+GET /api/health
+  |
+  |-- 失败：提示服务不可用或模型加载失败
+  |
+  v
+GET /api/styles
+  |
+  |-- 展示风格列表和预览图
+  |
+  v
+用户选择图片
+  |
+  v
+用户选择 style_id 并调整参数
+  |
+  v
 POST /api/style-transfer
-
-
-
-GET  /static/\*
-
+  |
+  |-- 失败：根据 code 展示错误提示
+  |
+  v
+拼接服务地址 + result_url
+  |
+  v
+展示生成图片 / 下载 / 保存历史记录
 ```
 
-即可完成完整 App 流程。
+## 8. 客户端本地历史作品建议结构
 
+历史记录不存储在 Python 服务端，建议客户端本地保存。
+
+```json
+{
+  "work_id": "work001",
+  "input_image_path": "/local/input001.jpg",
+  "result_image_url": "http://127.0.0.1:8000/static/results/result_8dfb8a6f4c0345f391f1d2d2a47c2a73.png",
+  "style_id": "vangogh",
+  "style_name": "梵高星空",
+  "parameters": {
+    "style_strength": 80,
+    "content_weight": 50,
+    "smoothness": 30,
+    "quality": "fast"
+  },
+  "time_ms": 2300,
+  "created_time": "2026-07-08 18:00:00"
+}
 ```
 
+字段建议：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `work_id` | string | 客户端生成的历史作品 ID |
+| `input_image_path` | string | 原始图片本地路径 |
+| `result_image_url` | string | 生成图片完整 URL |
+| `style_id` | string | 使用的风格 ID |
+| `style_name` | string | 使用的风格名称 |
+| `parameters` | object | 生成时使用的参数 |
+| `time_ms` | int | 服务端返回的处理耗时 |
+| `created_time` | string | 客户端保存时间 |
+
+## 9. 联调约定
+
+### 9.1 服务端固定约定
+
+必须稳定提供以下接口：
+
+```text
+GET  /api/health
+GET  /api/styles
+POST /api/style-transfer
+GET  /static/{path}
 ```
+
+`POST /api/style-transfer` 固定请求字段：
+
+```text
+image
+style_id
+style_strength
+content_weight
+smoothness
+quality
+```
+
+`POST /api/style-transfer` 固定返回字段：
+
+```text
+result_url
+time_ms
+parameters
+```
+
+### 9.2 客户端固定约定
+
+客户端只依赖以下内容：
+
+- 服务地址。
+- API 路径。
+- 请求字段名。
+- 响应字段名。
+- 业务错误码。
+
+客户端展示图片时，需要将服务地址与相对 URL 拼接：
+
+```text
+http://<server-ip>:8000 + /static/results/xxx.png
+```
+
+示例：
+
+```text
+http://127.0.0.1:8000/static/results/result_8dfb8a6f4c0345f391f1d2d2a47c2a73.png
+```
+
+## 10. 最小可交付接口
+
+完成完整 App 流程至少需要实现并联通以下接口：
+
+```text
+GET  /api/health
+GET  /api/styles
+POST /api/style-transfer
+GET  /static/{path}
+```
+
+其中：
+
+- `/api/health` 用于启动时检查服务状态。
+- `/api/styles` 用于渲染风格选择列表。
+- `/api/style-transfer` 用于生成艺术图片。
+- `/static/{path}` 用于访问风格预览图和生成结果图。
