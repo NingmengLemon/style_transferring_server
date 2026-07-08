@@ -27,6 +27,8 @@ class Settings:
     inference_timeout_s: float = float(os.getenv("STYLE_SERVER_TIMEOUT_S", "30"))
     preview_size: int = int(os.getenv("STYLE_SERVER_PREVIEW_SIZE", "512"))
     use_pretrained_vgg: bool = os.getenv("STYLE_SERVER_PRETRAINED_VGG", "1") != "0"
+    # 启动时预热模型，消除首个请求的冷启动尖峰（cudnn autotune、显存分配等）。
+    warmup_on_startup: bool = os.getenv("STYLE_SERVER_WARMUP", "1") != "0"
 
 
 settings = Settings()

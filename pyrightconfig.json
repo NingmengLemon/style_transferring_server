@@ -1,0 +1,15 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "src",
+    "tests"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "data",
+    "references"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "error"
+}

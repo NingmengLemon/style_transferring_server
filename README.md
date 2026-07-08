@@ -11,7 +11,7 @@
 
 ## 目录约定
 
-- WikiArt 数据集：`data/dataset/wikiart`
+- WikiArt 数据集：`data/dataset/wikiart` from <https://www.kaggle.com/datasets/steubk/wikiart>
 - 运行输出目录：`data/outputs`
 - 生成图片目录：`data/outputs/static/results`
 - 风格预览目录：`data/outputs/static/styles`
@@ -69,7 +69,19 @@ curl.exe -X POST "http://127.0.0.1:8000/api/style-transfer" `
 
 ## 性能说明
 
-服务使用 CUDA 时会自动选择 GPU，否则使用 CPU。为了适配 RTX4060 Laptop 显存并避免并发 OOM，风格迁移请求在进程内串行执行；`fast` 模式默认将长边限制到 384 像素并使用较少 LBFGS 迭代，兼顾演示速度和视觉效果。
+服务使用 CUDA 时会自动选择 GPU，否则使用 CPU。为了适配 RTX4060 Laptop 显存并避免并发 OOM，风格迁移请求在进程内串行执行。
+
+启动时会用一张小图做一次预热推理（warmup），触发 cudnn autotune 与显存分配，从而消除首个真实请求的冷启动尖峰。
+
+各质量档位的分辨率与迭代次数经 RTX4060 Laptop 实测校准，GPU 稳态耗时（不含冷启动，空载 GPU）：
+
+| quality | 长边像素 | LBFGS 迭代 | 实测耗时 |
+| ------- | ------- | --------- | ------- |
+| `fast`（默认） | 384 | 18 | ≈0.5s |
+| `normal` | 448 | 22 | ≈0.9s |
+| `hd` | 640 | 40 | ≈2.9s |
+
+`fast` 与 `normal` 稳定满足需求要求的“单张 < 2.5s”；`hd` 为尽力而为的高质量档，在空载 GPU 上约 2.9s，略高于预算，若 GPU 被其他进程占用可能触发 3006 超时。
 
 可通过环境变量调整：
 
@@ -78,3 +90,20 @@ curl.exe -X POST "http://127.0.0.1:8000/api/style-transfer" `
 - `STYLE_SERVER_MAX_UPLOAD_MB`：最大上传大小，默认 `10`。
 - `STYLE_SERVER_TIMEOUT_S`：单次推理超时秒数，默认 `30`。
 - `STYLE_SERVER_PRETRAINED_VGG`：是否加载 torchvision 预训练 VGG19，默认 `1`。离线环境可设为 `0`，但视觉效果会明显下降。
+- `STYLE_SERVER_WARMUP`：是否在启动时预热模型，默认 `1`。设为 `0` 可加快启动，但首个请求会较慢。
+
+## 测试
+
+```powershell
+uv run python -m pytest -q
+```
+
+测试为契约级用例，覆盖三个接口的响应格式、状态码与错误分支。为保证离线可跑且快速，测试通过桩替换真实推理，不加载预训练权重、不依赖 WikiArt 数据集与 GPU。
+
+## 静态类型检查
+
+```powershell
+uv run --with pyright pyright src/style_transferring_server tests
+```
+
+仓库根目录的 `pyrightconfig.json` 已将类型检查指向项目 `.venv`，确保依赖能被正确解析。

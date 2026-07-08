@@ -49,7 +49,11 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "httpx>=0.28.0"]
 
 [tool.uv]
 package = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

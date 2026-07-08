@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("style_transferring_server")
 
 
 @dataclass(frozen=True)
@@ -39,7 +42,8 @@ async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
     return error_response(exc.code, exc.message, exc.http_status)
 
 
-async def unhandled_error_handler(_request: Request, exc: Exception) -> JSONResponse:
-    """兜底异常处理器，避免返回非约定格式。"""
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """兜底异常处理器，避免返回非约定格式，同时不向客户端泄漏内部细节。"""
 
-    return error_response(1000, str(exc) or "internal server error", 500)
+    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+    return error_response(1000, "internal server error", 500)
