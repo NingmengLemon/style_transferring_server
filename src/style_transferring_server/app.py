@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 from typing import cast
@@ -14,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import STATIC_DIR, ensure_runtime_dirs, settings
+from .config import ensure_runtime_dirs, settings
+from .logging_config import configure_logging, get_logger
 from .responses import (
     ApiError,
     api_error_handler,
@@ -25,30 +28,40 @@ from .responses import (
 from .styles import style_registry
 from .transfer import style_transfer_service
 
+logger = get_logger()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """启动时准备目录、预热风格索引并尝试加载/预热模型。"""
 
     ensure_runtime_dirs()
+    logger.info(
+        "server starting: host=%s port=%s device=%s",
+        settings.host,
+        settings.port,
+        style_transfer_service.device,
+    )
     _ = style_registry.styles
     try:
         style_transfer_service.load_model()
     except ApiError:
         # 模型加载失败不阻止服务启动，健康检查会如实反映，
         # 真实请求会返回约定的 3003 错误码。
-        pass
+        logger.error("model failed to load at startup; will retry on request")
     else:
-        if settings.warmup_on_startup:
+        if settings.warmup:
             # 在后台线程预热，避免阻塞事件循环启动；
             # 消除首个真实请求的冷启动尖峰（cudnn autotune、显存分配）。
             await asyncio.to_thread(style_transfer_service.warmup)
     yield
+    logger.info("server shutting down")
 
 
 def create_app() -> FastAPI:
     """创建后端 HTTP 应用。"""
 
+    configure_logging()
     app = FastAPI(
         title="个性化数字艺术创作系统后端",
         description="基于 FastAPI、PyTorch 和 VGG19 的图像风格迁移服务。",
@@ -62,6 +75,23 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        request_id = uuid.uuid4().hex[:8]
+        start = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "%s %s -> %d (%dms) [req=%s]",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+            request_id,
+        )
+        return response
+
     app.add_exception_handler(ApiError, cast(ExceptionHandler, api_error_handler))
     app.add_exception_handler(
         Exception, cast(ExceptionHandler, unhandled_error_handler)
@@ -70,7 +100,7 @@ def create_app() -> FastAPI:
         RequestValidationError, cast(ExceptionHandler, validation_error_handler)
     )
     ensure_runtime_dirs()
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
 
     @app.get("/api/health", response_model=None)
     async def health() -> dict[str, object] | JSONResponse:

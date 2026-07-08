@@ -22,6 +22,19 @@
 uv run style-transferring-server
 ```
 
+命令行支持覆盖常用配置（优先级高于环境变量和配置文件）：
+
+```powershell
+uv run style-transferring-server --host 127.0.0.1 --port 9000 --log-level DEBUG --log-json
+uv run style-transferring-server --config my-config.json --no-warmup
+```
+
+查看全部参数：
+
+```powershell
+uv run style-transferring-server --help
+```
+
 也可以直接启动 ASGI 应用：
 
 ```powershell
@@ -33,6 +46,61 @@ uv run uvicorn style_transferring_server.app:app --host 0.0.0.0 --port 8000
 ```text
 http://127.0.0.1:8000
 ```
+
+## 配置
+
+配置来源优先级从高到低：命令行参数 > 环境变量（前缀 `STYLE_SERVER_`）> JSON 配置文件 > 默认值。
+
+JSON 配置文件默认读取项目根目录的 `config.json`，可用 `STYLE_SERVER_CONFIG` 或 `--config` 指定其他路径。示例：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8000,
+  "max_upload_mb": 10,
+  "timeout_s": 30,
+  "pretrained_vgg": true,
+  "warmup": true,
+  "log_level": "INFO",
+  "log_json": false,
+  "styles_config": "config/styles.json"
+}
+```
+
+可配置字段（环境变量为字段名大写并加 `STYLE_SERVER_` 前缀，如 `STYLE_SERVER_PORT`）：
+
+| 字段 | 说明 | 默认 |
+| ---- | ---- | ---- |
+| `host` | 监听地址 | `0.0.0.0` |
+| `port` | 监听端口 | `8000` |
+| `max_upload_mb` | 最大上传大小(MB) | `10` |
+| `timeout_s` | 单次推理超时秒数 | `30` |
+| `preview_size` | 风格预览图长边像素 | `512` |
+| `pretrained_vgg` | 是否加载预训练 VGG19 | `true` |
+| `warmup` | 是否启动时预热模型 | `true` |
+| `data_dir` | 数据与输出根目录 | `data` |
+| `styles_config` | 风格定义文件路径 | `config/styles.json` |
+| `log_level` | 日志级别 | `INFO` |
+| `log_file` | 日志文件路径(可选) | 无 |
+| `log_json` | 是否输出 JSON 结构化日志 | `false` |
+
+## 风格配置
+
+可选风格由外部文件 `config/styles.json` 定义，无需改动代码即可增删风格。每个条目字段：
+
+- `style_id`：风格唯一编号（前端使用）。
+- `name` / `artist` / `description`：展示信息。
+- `query`：在 WikiArt `classes.csv` 的 `filename` 中匹配的关键字（命中具体作品）。
+- `fallback_genre`：匹配失败时回退到的画派目录名。
+
+服务启动时按此文件从 WikiArt 数据集挑选代表作并生成预览图。
+
+## 日志
+
+统一 logger 名为 `style_transferring_server`，记录服务启动、模型加载与预热、每个 HTTP 请求（方法、路径、状态码、耗时、请求 ID）以及每次风格迁移的参数与耗时。
+
+- 文本格式（默认）便于开发查看；设 `log_json=true`（或 `--log-json`）输出单行 JSON，便于日志采集。
+- 设 `log_file` 可同时写入文件。
 
 ## 调用示例
 
@@ -83,14 +151,7 @@ curl.exe -X POST "http://127.0.0.1:8000/api/style-transfer" `
 
 `fast` 与 `normal` 稳定满足需求要求的“单张 < 2.5s”；`hd` 为尽力而为的高质量档，在空载 GPU 上约 2.9s，略高于预算，若 GPU 被其他进程占用可能触发 3006 超时。
 
-可通过环境变量调整：
-
-- `STYLE_SERVER_HOST`：监听地址，默认 `0.0.0.0`。
-- `STYLE_SERVER_PORT`：端口，默认 `8000`。
-- `STYLE_SERVER_MAX_UPLOAD_MB`：最大上传大小，默认 `10`。
-- `STYLE_SERVER_TIMEOUT_S`：单次推理超时秒数，默认 `30`。
-- `STYLE_SERVER_PRETRAINED_VGG`：是否加载 torchvision 预训练 VGG19，默认 `1`。离线环境可设为 `0`，但视觉效果会明显下降。
-- `STYLE_SERVER_WARMUP`：是否在启动时预热模型，默认 `1`。设为 `0` 可加快启动，但首个请求会较慢。
+相关配置项（`timeout_s`、`pretrained_vgg`、`warmup` 等）见上文 [配置](#配置) 章节。离线环境可将 `pretrained_vgg` 设为 `false`，但视觉效果会明显下降。
 
 ## 测试
 

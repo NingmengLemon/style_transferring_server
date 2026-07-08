@@ -1,0 +1,52 @@
+{
+  "styles": [
+    {
+      "style_id": "vangogh",
+      "name": "梵高星空",
+      "artist": "Vincent van Gogh",
+      "description": "后印象派旋涡笔触和高饱和色彩风格",
+      "query": "vincent-van-gogh_the-starry-night-1889",
+      "fallback_genre": "Post_Impressionism"
+    },
+    {
+      "style_id": "picasso",
+      "name": "毕加索立体主义",
+      "artist": "Pablo Picasso",
+      "description": "几何分解、平面化与抽象结构风格",
+      "query": "pablo-picasso",
+      "fallback_genre": "Analytical_Cubism"
+    },
+    {
+      "style_id": "monet",
+      "name": "莫奈印象派",
+      "artist": "Claude Monet",
+      "description": "明亮色彩、柔和光影和印象派笔触",
+      "query": "claude-monet",
+      "fallback_genre": "Impressionism"
+    },
+    {
+      "style_id": "kandinsky",
+      "name": "康定斯基表现主义",
+      "artist": "Wassily Kandinsky",
+      "description": "强烈色块、抽象构成和表现主义张力",
+      "query": "wassily-kandinsky",
+      "fallback_genre": "Expressionism"
+    },
+    {
+      "style_id": "hokusai",
+      "name": "葛饰北斋浮世绘",
+      "artist": "Katsushika Hokusai",
+      "description": "清晰轮廓、装饰性色面和浮世绘风格",
+      "query": "katsushika-hokusai_a-colored-version-of-the-big-wave",
+      "fallback_genre": "Ukiyo_e"
+    },
+    {
+      "style_id": "munch",
+      "name": "蒙克表现主义",
+      "artist": "Edvard Munch",
+      "description": "扭曲线条、强烈情绪和表现主义色彩",
+      "query": "edvard-munch_anxiety",
+      "fallback_genre": "Expressionism"
+    }
+  ]
+}

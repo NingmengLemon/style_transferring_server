@@ -17,9 +17,12 @@ import torch.nn.functional as F
 from torchvision.models import VGG19_Weights, vgg19
 from torchvision.transforms import functional as TF
 
-from .config import RESULTS_DIR, settings
+from .config import settings
+from .logging_config import get_logger
 from .responses import ApiError
 from .styles import StyleInfo
+
+logger = get_logger()
 
 
 VALID_QUALITIES = {"fast", "normal", "hd"}
@@ -70,9 +73,7 @@ class StyleTransferService:
         if self.model is not None:
             return
         try:
-            weights = (
-                VGG19_Weights.IMAGENET1K_V1 if settings.use_pretrained_vgg else None
-            )
+            weights = VGG19_Weights.IMAGENET1K_V1 if settings.pretrained_vgg else None
             features = vgg19(weights=weights).features.eval().to(self.device)
             for parameter in features.parameters():
                 parameter.requires_grad_(False)
@@ -80,9 +81,15 @@ class StyleTransferService:
             # 被声明为宽泛的 Module，这里显式收窄以便静态检查与迭代。
             self.model = cast(nn.Sequential, features)
             self.model_error = None
+            logger.info(
+                "VGG19 model loaded (device=%s, pretrained=%s)",
+                self.device,
+                settings.pretrained_vgg,
+            )
         except Exception as exc:
             self.model_error = str(exc)
             self.model = None
+            logger.exception("model loading failed")
             raise ApiError(3003, "model loading failed", 500) from exc
 
     def warmup(self) -> None:
@@ -106,8 +113,9 @@ class StyleTransferService:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+            logger.info("model warmup completed")
         except Exception:
-            pass
+            logger.warning("model warmup failed; continuing", exc_info=True)
 
     def validate_parameters(
         self,
@@ -155,6 +163,16 @@ class StyleTransferService:
         self.load_model()
         assert self.model is not None
 
+        logger.info(
+            "style-transfer start: style=%s quality=%s params=(%d,%d,%d) size=%dB",
+            style.style_id,
+            params.quality,
+            params.style_strength,
+            params.content_weight,
+            params.smoothness,
+            len(image_bytes),
+        )
+
         content_image = self._read_upload(image_bytes, filename)
         style_image = self._read_style(style.image_path)
         max_side = MAX_SIDE_BY_QUALITY[params.quality]
@@ -183,14 +201,22 @@ class StyleTransferService:
             )
 
         result_name = f"result_{uuid.uuid4().hex}.png"
-        result_path = RESULTS_DIR / result_name
+        result_path = settings.results_dir / result_name
         output_image.save(result_path, "PNG", optimize=True)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "style-transfer done: style=%s quality=%s time_ms=%d result=%s",
+            style.style_id,
+            params.quality,
+            elapsed_ms,
+            result_name,
+        )
         return {
             "result_url": f"/static/results/{result_name}",
-            "time_ms": int((time.perf_counter() - start) * 1000),
+            "time_ms": elapsed_ms,
             "parameters": {
                 "style_strength": params.style_strength,
                 "content_weight": params.content_weight,
@@ -300,7 +326,7 @@ class StyleTransferService:
         content_weight = 10.0 * max(params.content_weight, 1) / 50
         total_variation_weight = 0.00002 * params.smoothness
         iterations = ITERATIONS_BY_QUALITY[params.quality]
-        deadline = time.perf_counter() + settings.inference_timeout_s
+        deadline = time.perf_counter() + settings.timeout_s
 
         for _ in range(iterations):
             if time.perf_counter() > deadline:
