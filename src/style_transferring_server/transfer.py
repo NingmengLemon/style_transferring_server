@@ -20,6 +20,11 @@ from torchvision.transforms import functional as TF
 from .config import settings
 from .logging_config import get_logger
 from .responses import ApiError
+from .schemas import (
+    Quality,
+    TransferParameters as TransferParametersSchema,
+    TransferResult,
+)
 from .styles import StyleInfo
 
 logger = get_logger()
@@ -41,7 +46,7 @@ class TransferParameters:
     style_strength: int = 70
     content_weight: int = 50
     smoothness: int = 30
-    quality: str = "fast"
+    quality: Quality = "fast"
 
 
 class StyleTransferService:
@@ -136,7 +141,9 @@ class StyleTransferService:
                 raise ApiError(3002, f"{name} must between 0 and 100", 400)
         if quality not in VALID_QUALITIES:
             raise ApiError(3002, "quality must be fast, normal or hd", 400)
-        return TransferParameters(style_strength, content_weight, smoothness, quality)
+        return TransferParameters(
+            style_strength, content_weight, smoothness, cast(Quality, quality)
+        )
 
     async def transfer(
         self,
@@ -144,7 +151,7 @@ class StyleTransferService:
         filename: str,
         style: StyleInfo,
         params: TransferParameters,
-    ) -> dict[str, object]:
+    ) -> TransferResult:
         """异步串行执行一次风格迁移，避免显存并发峰值。"""
 
         async with self._lock:
@@ -158,7 +165,7 @@ class StyleTransferService:
         filename: str,
         style: StyleInfo,
         params: TransferParameters,
-    ) -> dict[str, object]:
+    ) -> TransferResult:
         start = time.perf_counter()
         self.load_model()
         assert self.model is not None
@@ -214,16 +221,16 @@ class StyleTransferService:
             elapsed_ms,
             result_name,
         )
-        return {
-            "result_url": f"/static/results/{result_name}",
-            "time_ms": elapsed_ms,
-            "parameters": {
-                "style_strength": params.style_strength,
-                "content_weight": params.content_weight,
-                "smoothness": params.smoothness,
-                "quality": params.quality,
-            },
-        }
+        return TransferResult(
+            result_url=f"/static/results/{result_name}",
+            time_ms=elapsed_ms,
+            parameters=TransferParametersSchema(
+                style_strength=params.style_strength,
+                content_weight=params.content_weight,
+                smoothness=params.smoothness,
+                quality=params.quality,
+            ),
+        )
 
     def _read_upload(self, image_bytes: bytes, filename: str) -> Image.Image:
         if not image_bytes:

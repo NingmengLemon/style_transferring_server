@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -19,12 +18,6 @@ class ApiError(Exception):
     code: int
     message: str
     http_status: int = 400
-
-
-def success(data: Any) -> dict[str, Any]:
-    """构造统一成功响应。"""
-
-    return {"code": 0, "message": "success", "data": data}
 
 
 def error_response(code: int, message: str, http_status: int) -> JSONResponse:

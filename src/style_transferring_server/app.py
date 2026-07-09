@@ -6,15 +6,14 @@ import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
-
 from typing import cast
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from starlette.types import ExceptionHandler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ExceptionHandler
 
 from .config import ensure_runtime_dirs, settings
 from .logging_config import configure_logging, get_logger
@@ -22,8 +21,16 @@ from .responses import (
     ApiError,
     api_error_handler,
     error_response,
-    success,
     unhandled_error_handler,
+)
+from .schemas import (
+    ErrorResponse,
+    HealthData,
+    HealthResponse,
+    StyleItem,
+    StylesData,
+    StylesResponse,
+    TransferResponse,
 )
 from .styles import style_registry
 from .transfer import style_transfer_service
@@ -102,8 +109,13 @@ def create_app() -> FastAPI:
     ensure_runtime_dirs()
     app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
 
-    @app.get("/api/health", response_model=None)
-    async def health() -> dict[str, object] | JSONResponse:
+    @app.get(
+        "/api/health",
+        response_model=HealthResponse,
+        responses={500: {"model": ErrorResponse}},
+        summary="服务与模型状态检查",
+    )
+    async def health() -> HealthResponse | JSONResponse:
         # 模型尚未加载时先尝试加载一次，让健康检查能如实反映真实状态。
         if not style_transfer_service.model_loaded:
             try:
@@ -111,27 +123,46 @@ def create_app() -> FastAPI:
             except ApiError:
                 # 加载失败：按契约返回 3003，供客户端在启动流程中感知故障。
                 return error_response(3003, "model loading failed", 500)
-        return success(
-            {
-                "status": "running",
-                "model_loaded": style_transfer_service.model_loaded,
-                "device": str(style_transfer_service.device),
-            }
+        return HealthResponse(
+            data=HealthData(
+                status="running",
+                model_loaded=style_transfer_service.model_loaded,
+                device=str(style_transfer_service.device),
+            )
         )
 
-    @app.get("/api/styles")
-    async def styles() -> dict[str, object]:
-        return success({"styles": style_registry.list_for_api()})
+    @app.get(
+        "/api/styles",
+        response_model=StylesResponse,
+        summary="获取可选风格列表",
+    )
+    async def styles() -> StylesResponse:
+        items = [StyleItem(**item) for item in style_registry.list_for_api()]
+        return StylesResponse(data=StylesData(styles=items))
 
-    @app.post("/api/style-transfer")
+    @app.post(
+        "/api/style-transfer",
+        response_model=TransferResponse,
+        responses={
+            400: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            415: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+            504: {"model": ErrorResponse},
+        },
+        summary="执行图像风格迁移",
+    )
     async def style_transfer(
-        image: UploadFile = File(...),
-        style_id: str = Form(...),
-        style_strength: int = Form(70),
-        content_weight: int = Form(50),
-        smoothness: int = Form(30),
-        quality: str = Form("fast"),
-    ) -> dict[str, object]:
+        # 注意：范围/枚举校验交给业务层 validate_parameters 处理，
+        # 以返回约定的 3002/3001 业务码，而非表单层的 1000。
+        image: UploadFile = File(..., description="内容图像（jpg/jpeg/png）"),
+        style_id: str = Form(..., description="风格 ID"),
+        style_strength: int = Form(70, description="风格强度 0-100"),
+        content_weight: int = Form(50, description="内容保留程度 0-100"),
+        smoothness: int = Form(30, description="细节平滑程度 0-100"),
+        quality: str = Form("fast", description="生成质量：fast/normal/hd"),
+    ) -> TransferResponse:
         style = style_registry.get(style_id)
         if style is None:
             raise ApiError(3001, "style not found", 400)
@@ -142,7 +173,7 @@ def create_app() -> FastAPI:
         result = await style_transfer_service.transfer(
             data, image.filename or "upload.jpg", style, params
         )
-        return success(result)
+        return TransferResponse(data=result)
 
     return app
 
