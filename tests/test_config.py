@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from style_transferring_server.config import Settings
 from style_transferring_server.styles import load_style_candidates
 
 
-def test_json_config_loaded(tmp_path: Path, monkeypatch) -> None:
+def test_json_config_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "config.json"
     config_file.write_text(
         json.dumps({"port": 9123, "log_level": "DEBUG", "warmup": False}),
@@ -22,7 +24,7 @@ def test_json_config_loaded(tmp_path: Path, monkeypatch) -> None:
     assert settings.warmup is False
 
 
-def test_env_overrides_json(tmp_path: Path, monkeypatch) -> None:
+def test_env_overrides_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "config.json"
     config_file.write_text(json.dumps({"port": 9123}), encoding="utf-8")
     monkeypatch.setenv("STYLE_SERVER_CONFIG", str(config_file))
@@ -32,7 +34,7 @@ def test_env_overrides_json(tmp_path: Path, monkeypatch) -> None:
     assert settings.port == 7777
 
 
-def test_init_overrides_all(tmp_path: Path, monkeypatch) -> None:
+def test_init_overrides_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "config.json"
     config_file.write_text(json.dumps({"port": 9123}), encoding="utf-8")
     monkeypatch.setenv("STYLE_SERVER_CONFIG", str(config_file))

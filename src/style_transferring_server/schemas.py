@@ -7,14 +7,28 @@
 
 from __future__ import annotations
 
-from typing import Generic, Literal, TypeVar
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .constants import DEFAULT_QUALITY, ErrorCode, HttpStatus, TransferDefault
+from .responses import ApiError
 
 DataT = TypeVar("DataT")
 
 # 生成质量档位。
 Quality = Literal["fast", "normal", "hd"]
+QualityValue = Annotated[Quality, Field(description="生成质量：fast/normal/hd")]
+PercentValue = Annotated[int, Field(ge=0, le=100)]
+
+
+class StyleSource(StrEnum):
+    """风格图片来源，为后续用户自定义风格预留扩展点。"""
+
+    BUILTIN = "builtin"
+    CUSTOM = "custom"
 
 
 class ApiResponse(BaseModel, Generic[DataT]):
@@ -47,6 +61,37 @@ class HealthData(BaseModel):
 # ---- /api/styles ----
 
 
+class StyleCandidate(BaseModel):
+    """外部配置里定义的风格候选。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    style_id: str = Field(..., min_length=1, description="风格唯一编号")
+    name: str = Field(..., min_length=1, description="风格名称")
+    artist: str = Field(..., min_length=1, description="艺术家")
+    description: str = Field(default="", description="风格描述")
+    query: str = Field(..., min_length=1, description="WikiArt 文件名匹配关键词")
+    fallback_genre: str = Field(..., min_length=1, description="兜底 WikiArt 题材目录")
+
+
+class StyleInfo(BaseModel):
+    """服务端内部使用的风格资源信息。"""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    style_id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    artist: str = Field(..., min_length=1)
+    description: str = ""
+    preview_url: str
+    image_path: Path
+    source: StyleSource = StyleSource.BUILTIN
+    owner_id: str | None = Field(
+        default=None,
+        description="自定义风格所属用户；内置风格为空。当前仅作为后续落地预留。",
+    )
+
+
 class StyleItem(BaseModel):
     """单个可选风格。"""
 
@@ -71,10 +116,39 @@ class StylesData(BaseModel):
 class TransferParameters(BaseModel):
     """本次风格迁移实际使用的参数。"""
 
-    style_strength: int = Field(..., ge=0, le=100, description="风格强度")
-    content_weight: int = Field(..., ge=0, le=100, description="内容保留程度")
-    smoothness: int = Field(..., ge=0, le=100, description="细节平滑程度")
-    quality: Quality = Field(..., description="生成质量")
+    model_config = ConfigDict(frozen=True)
+
+    style_strength: PercentValue = Field(..., description="风格强度")
+    content_weight: PercentValue = Field(..., description="内容保留程度")
+    smoothness: PercentValue = Field(..., description="细节平滑程度")
+    quality: QualityValue = DEFAULT_QUALITY
+
+    @classmethod
+    def from_form_values(
+        cls,
+        style_strength: int = TransferDefault.STYLE_STRENGTH,
+        content_weight: int = TransferDefault.CONTENT_WEIGHT,
+        smoothness: int = TransferDefault.SMOOTHNESS,
+        quality: str = DEFAULT_QUALITY,
+    ) -> "TransferParameters":
+        """从 multipart 表单值构造参数，并映射为业务错误码。"""
+
+        try:
+            return cls.model_validate(
+                {
+                    "style_strength": style_strength,
+                    "content_weight": content_weight,
+                    "smoothness": smoothness,
+                    "quality": quality,
+                }
+            )
+        except ValidationError as exc:
+            raise ApiError(
+                ErrorCode.INVALID_TRANSFER_PARAMETER,
+                "style_strength/content_weight/smoothness must between 0 and 100; "
+                "quality must be fast, normal or hd",
+                HttpStatus.BAD_REQUEST,
+            ) from exc
 
 
 class TransferResult(BaseModel):

@@ -49,11 +49,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
-    "httpx2>=2.5.0",
-]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "httpx2>=2.5.0", "mypy>=2.2.0"]
 
 [tool.uv]
 package = true
@@ -61,3 +57,15 @@ package = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.mypy]
+exclude = ["references", "tests"]
+follow_imports = "normal"
+ignore_missing_imports = true
+show_column_numbers = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_return_any = true
+warn_redundant_casts = true
+disallow_untyped_calls = true
+strict_equality = true

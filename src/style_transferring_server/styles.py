@@ -9,40 +9,22 @@ from __future__ import annotations
 import csv
 import json
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from PIL import Image, ImageOps
 
 from .config import Settings, settings
+from .constants import (
+    STYLE_PREVIEW_IMAGE_FORMAT,
+    STYLE_PREVIEW_QUALITY,
+    ApiPath,
+    StaticSubdir,
+)
 from .logging_config import get_logger
+from .schemas import StyleCandidate, StyleInfo
 
 logger = get_logger()
-
-
-@dataclass(frozen=True)
-class StyleInfo:
-    """一个可供前端选择的风格。"""
-
-    style_id: str
-    name: str
-    artist: str
-    description: str
-    preview_url: str
-    image_path: Path
-
-
-@dataclass(frozen=True)
-class StyleCandidate:
-    """外部配置里定义的风格候选。"""
-
-    style_id: str
-    name: str
-    artist: str
-    description: str
-    query: str
-    fallback_genre: str
 
 
 def load_style_candidates(config_path: Path) -> tuple[StyleCandidate, ...]:
@@ -58,20 +40,20 @@ def load_style_candidates(config_path: Path) -> tuple[StyleCandidate, ...]:
         return ()
 
     entries = raw.get("styles", []) if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        logger.error(
+            "styles config must be a list or contain a 'styles' list: %s", config_path
+        )
+        return ()
+
     candidates: list[StyleCandidate] = []
     for entry in entries:
+        if not isinstance(entry, dict):
+            logger.error("invalid style entry skipped: %s", entry)
+            continue
         try:
-            candidates.append(
-                StyleCandidate(
-                    style_id=entry["style_id"],
-                    name=entry["name"],
-                    artist=entry["artist"],
-                    description=entry["description"],
-                    query=entry["query"],
-                    fallback_genre=entry["fallback_genre"],
-                )
-            )
-        except (KeyError, TypeError) as exc:
+            candidates.append(StyleCandidate.model_validate(entry))
+        except ValueError as exc:
             logger.error("invalid style entry skipped: %s (%s)", entry, exc)
     return tuple(candidates)
 
@@ -93,17 +75,14 @@ class StyleRegistry:
             self._styles = self._load_styles()
         return self._styles
 
-    def list_for_api(self) -> list[dict[str, str]]:
+    def list_for_api(self) -> list[dict[str, Any]]:
         """返回符合前端 API 文档的风格列表。"""
 
         return [
-            {
-                "style_id": style.style_id,
-                "name": style.name,
-                "artist": style.artist,
-                "description": style.description,
-                "preview_url": style.preview_url,
-            }
+            style.model_dump(
+                mode="json",
+                include={"style_id", "name", "artist", "description", "preview_url"},
+            )
             for style in self.styles.values()
         ]
 
@@ -170,18 +149,29 @@ class StyleRegistry:
         return None
 
     def _ensure_preview(self, style_id: str, source_path: Path) -> str:
-        preview_path = self._config.style_static_dir / f"{style_id}.jpg"
+        preview_filename = f"{style_id}.jpg"
+        preview_path = self._config.style_static_dir / preview_filename
+        preview_url = (
+            f"{ApiPath.STATIC_PREFIX}/{StaticSubdir.STYLES}/{preview_filename}"
+        )
         if preview_path.exists():
-            return f"/static/styles/{style_id}.jpg"
+            return preview_url
         try:
-            with Image.open(source_path) as image:
-                image = ImageOps.exif_transpose(image).convert("RGB")
-                image.thumbnail((self._config.preview_size, self._config.preview_size))
-                image.save(preview_path, "JPEG", quality=88, optimize=True)
+            with Image.open(source_path) as opened_image:
+                converted_image = ImageOps.exif_transpose(opened_image).convert("RGB")
+                converted_image.thumbnail(
+                    (self._config.preview_size, self._config.preview_size)
+                )
+                converted_image.save(
+                    preview_path,
+                    STYLE_PREVIEW_IMAGE_FORMAT,
+                    quality=STYLE_PREVIEW_QUALITY,
+                    optimize=True,
+                )
         except Exception:
             logger.exception("failed to build preview for '%s', copying raw", style_id)
             shutil.copyfile(source_path, preview_path)
-        return f"/static/styles/{style_id}.jpg"
+        return preview_url
 
 
 style_registry = StyleRegistry()

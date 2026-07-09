@@ -5,17 +5,27 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import cast
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ExceptionHandler
 
 from .config import ensure_runtime_dirs, settings
+from .constants import (
+    DEFAULT_QUALITY,
+    MILLISECONDS_PER_SECOND,
+    REQUEST_ID_HEX_LENGTH,
+    ApiPath,
+    ErrorCode,
+    HttpStatus,
+    TransferDefault,
+)
 from .logging_config import configure_logging, get_logger
 from .responses import (
     ApiError,
@@ -30,6 +40,7 @@ from .schemas import (
     StyleItem,
     StylesData,
     StylesResponse,
+    TransferParameters,
     TransferResponse,
 )
 from .styles import style_registry
@@ -39,7 +50,7 @@ logger = get_logger()
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """启动时准备目录、预热风格索引并尝试加载/预热模型。"""
 
     ensure_runtime_dirs()
@@ -84,11 +95,14 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
-    async def log_requests(request: Request, call_next):
-        request_id = uuid.uuid4().hex[:8]
+    async def log_requests(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        request_id = uuid.uuid4().hex[:REQUEST_ID_HEX_LENGTH]
         start = time.perf_counter()
         response = await call_next(request)
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        elapsed_ms = int((time.perf_counter() - start) * MILLISECONDS_PER_SECOND)
         logger.info(
             "%s %s -> %d (%dms) [req=%s]",
             request.method,
@@ -107,10 +121,14 @@ def create_app() -> FastAPI:
         RequestValidationError, cast(ExceptionHandler, validation_error_handler)
     )
     ensure_runtime_dirs()
-    app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
+    app.mount(
+        ApiPath.STATIC_PREFIX,
+        StaticFiles(directory=settings.static_dir),
+        name="static",
+    )
 
     @app.get(
-        "/api/health",
+        ApiPath.HEALTH,
         response_model=HealthResponse,
         responses={500: {"model": ErrorResponse}},
         summary="服务与模型状态检查",
@@ -122,7 +140,11 @@ def create_app() -> FastAPI:
                 style_transfer_service.load_model()
             except ApiError:
                 # 加载失败：按契约返回 3003，供客户端在启动流程中感知故障。
-                return error_response(3003, "model loading failed", 500)
+                return error_response(
+                    ErrorCode.MODEL_LOADING_FAILED,
+                    "model loading failed",
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                )
         return HealthResponse(
             data=HealthData(
                 status="running",
@@ -132,7 +154,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get(
-        "/api/styles",
+        ApiPath.STYLES,
         response_model=StylesResponse,
         summary="获取可选风格列表",
     )
@@ -141,15 +163,15 @@ def create_app() -> FastAPI:
         return StylesResponse(data=StylesData(styles=items))
 
     @app.post(
-        "/api/style-transfer",
+        ApiPath.STYLE_TRANSFER,
         response_model=TransferResponse,
         responses={
-            400: {"model": ErrorResponse},
-            413: {"model": ErrorResponse},
-            415: {"model": ErrorResponse},
-            500: {"model": ErrorResponse},
-            503: {"model": ErrorResponse},
-            504: {"model": ErrorResponse},
+            HttpStatus.BAD_REQUEST: {"model": ErrorResponse},
+            HttpStatus.PAYLOAD_TOO_LARGE: {"model": ErrorResponse},
+            HttpStatus.UNSUPPORTED_MEDIA_TYPE: {"model": ErrorResponse},
+            HttpStatus.INTERNAL_SERVER_ERROR: {"model": ErrorResponse},
+            HttpStatus.SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+            HttpStatus.GATEWAY_TIMEOUT: {"model": ErrorResponse},
         },
         summary="执行图像风格迁移",
     )
@@ -158,15 +180,28 @@ def create_app() -> FastAPI:
         # 以返回约定的 3002/3001 业务码，而非表单层的 1000。
         image: UploadFile = File(..., description="内容图像（jpg/jpeg/png）"),
         style_id: str = Form(..., description="风格 ID"),
-        style_strength: int = Form(70, description="风格强度 0-100"),
-        content_weight: int = Form(50, description="内容保留程度 0-100"),
-        smoothness: int = Form(30, description="细节平滑程度 0-100"),
-        quality: str = Form("fast", description="生成质量：fast/normal/hd"),
+        style_strength: int = Form(
+            TransferDefault.STYLE_STRENGTH,
+            description="风格强度 0-100",
+        ),
+        content_weight: int = Form(
+            TransferDefault.CONTENT_WEIGHT,
+            description="内容保留程度 0-100",
+        ),
+        smoothness: int = Form(
+            TransferDefault.SMOOTHNESS,
+            description="细节平滑程度 0-100",
+        ),
+        quality: str = Form(DEFAULT_QUALITY, description="生成质量：fast/normal/hd"),
     ) -> TransferResponse:
         style = style_registry.get(style_id)
         if style is None:
-            raise ApiError(3001, "style not found", 400)
-        params = style_transfer_service.validate_parameters(
+            raise ApiError(
+                ErrorCode.STYLE_NOT_FOUND,
+                "style not found",
+                HttpStatus.BAD_REQUEST,
+            )
+        params = TransferParameters.from_form_values(
             style_strength, content_weight, smoothness, quality
         )
         data = await image.read()
@@ -183,7 +218,7 @@ async def validation_error_handler(
 ) -> JSONResponse:
     """将 FastAPI 表单校验错误映射为前端约定格式。"""
 
-    return error_response(1000, "parameter error", 400)
+    return error_response(ErrorCode.GENERIC, "parameter error", HttpStatus.BAD_REQUEST)
 
 
 app = create_app()

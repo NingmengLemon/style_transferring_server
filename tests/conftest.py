@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import io
 import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
+import torch
 
 # 测试默认关闭预训练权重下载与启动预热，保证离线可跑、启动快。
 os.environ.setdefault("STYLE_SERVER_PRETRAINED_VGG", "0")
 os.environ.setdefault("STYLE_SERVER_WARMUP", "0")
 
-from PIL import Image  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
+from PIL import Image
 
-from style_transferring_server.app import app  # noqa: E402
-from style_transferring_server.styles import StyleInfo, style_registry  # noqa: E402
-from style_transferring_server import transfer as transfer_module  # noqa: E402
+from style_transferring_server import transfer as transfer_module
+from style_transferring_server.app import app
+from style_transferring_server.styles import StyleInfo, style_registry
 
 
 def _make_image_bytes(fmt: str = "JPEG", size: tuple[int, int] = (64, 64)) -> bytes:
@@ -36,7 +40,7 @@ def png_bytes() -> bytes:
 
 
 @pytest.fixture(autouse=True)
-def fake_style(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def fake_style(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     """注入一个虚拟风格，避免依赖真实 WikiArt 数据集。"""
 
     style_path = tmp_path / "fake_style.jpg"
@@ -54,28 +58,31 @@ def fake_style(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def fast_transfer(monkeypatch: pytest.MonkeyPatch):
+def fast_transfer(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """将真实推理替换为轻量桩，保证测试快速且不占显存。"""
 
     service = transfer_module.style_transfer_service
 
-    def fake_run_optimization(content, style, params):
+    def fake_run_optimization(
+        content: torch.Tensor,
+        _style: torch.Tensor,
+        _params: object,
+    ) -> torch.Tensor:
         # 直接返回内容张量，跳过 LBFGS 迭代。
         return content.detach()
 
+    def fake_load_model() -> None:
+        service.model = service.model or cast(Any, _StubModule())
+
     monkeypatch.setattr(service, "_run_optimization", fake_run_optimization)
-    monkeypatch.setattr(
-        service,
-        "load_model",
-        lambda: setattr(service, "model", service.model or _StubModule()),
-    )
+    monkeypatch.setattr(service, "load_model", fake_load_model)
     yield
 
 
 class _StubModule:
     """占位模型，让 model_loaded 为真但不参与桩化后的推理。"""
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[object]:
         return iter(())
 
 

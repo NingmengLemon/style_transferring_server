@@ -13,14 +13,12 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
 from pydantic_settings import (
     BaseSettings,
     JsonConfigSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_FILE = PROJECT_ROOT / "config.json"
@@ -87,6 +85,12 @@ class Settings(BaseSettings):
     def wikiart_dir(self) -> Path:
         return self.data_dir / "dataset" / "wikiart"
 
+    @property
+    def custom_styles_dir(self) -> Path:
+        """用户自定义风格图片目录，当前仅预留给后续上传接口。"""
+
+        return self.output_dir / "custom_styles"
+
     def runtime_dirs(self) -> tuple[Path, ...]:
         return (
             self.output_dir,
@@ -94,6 +98,7 @@ class Settings(BaseSettings):
             self.results_dir,
             self.style_static_dir,
             self.upload_dir,
+            self.custom_styles_dir,
         )
 
     @classmethod

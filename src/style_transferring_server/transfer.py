@@ -6,32 +6,43 @@ import asyncio
 import io
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, Final, cast
 
-from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 from torchvision.models import VGG19_Weights, vgg19
 from torchvision.transforms import functional as TF
 
 from .config import settings
+from .constants import (
+    DEFAULT_QUALITY,
+    RESULT_FILENAME_PREFIX,
+    RESULT_IMAGE_FORMAT,
+    RGB_CHANNELS,
+    SMOOTHNESS_FILTER_THRESHOLD,
+    SMOOTHNESS_RADIUS_SCALE,
+    SUPPORTED_IMAGE_FORMATS,
+    SUPPORTED_UPLOAD_EXTENSIONS,
+    WARMUP_IMAGE_SIZE,
+    WARMUP_RGB_VALUE,
+    ApiPath,
+    ErrorCode,
+    HttpStatus,
+    ImageConstraint,
+    StaticSubdir,
+    TransferDefault,
+)
 from .logging_config import get_logger
 from .responses import ApiError
-from .schemas import (
-    Quality,
-    TransferParameters as TransferParametersSchema,
-    TransferResult,
-)
+from .schemas import Quality, TransferParameters, TransferResult
 from .styles import StyleInfo
 
 logger = get_logger()
 
 
-VALID_QUALITIES = {"fast", "normal", "hd"}
-VALID_EXTENSIONS = {"jpg", "jpeg", "png"}
 # 各质量档位的长边像素、外层步数与每步 LBFGS 内迭代次数。
 #
 # 关键：真正决定风格转移充分度的是「closure 评估总次数 ≈ STEPS × LBFGS_MAX_ITER」
@@ -40,19 +51,18 @@ VALID_EXTENSIONS = {"jpg", "jpeg", "png"}
 #
 # 经 RTX4060 Laptop 实测校准（含冷启动后稳态，空载 GPU）：
 #   fast≈1.5s、normal≈3.5s、hd≈8s。fast 满足实时预算；normal/hd 为高质量档。
-MAX_SIDE_BY_QUALITY = {"fast": 384, "normal": 448, "hd": 576}
-STEPS_BY_QUALITY = {"fast": 6, "normal": 8, "hd": 10}
-LBFGS_MAX_ITER_BY_QUALITY = {"fast": 8, "normal": 10, "hd": 12}
-
-
-@dataclass(frozen=True)
-class TransferParameters:
-    """风格迁移可调参数。"""
-
-    style_strength: int = 70
-    content_weight: int = 50
-    smoothness: int = 30
-    quality: Quality = "fast"
+MAX_SIDE_BY_QUALITY: Final[dict[Quality, int]] = {
+    "fast": 384,
+    "normal": 448,
+    "hd": 576,
+}
+STEPS_BY_QUALITY: Final[dict[Quality, int]] = {"fast": 6, "normal": 8, "hd": 10}
+LBFGS_MAX_ITER_BY_QUALITY: Final[dict[Quality, int]] = {
+    "fast": 8,
+    "normal": 10,
+    "hd": 12,
+}
+MILLISECONDS_PER_SECOND: Final[int] = 1000
 
 
 class StyleTransferService:
@@ -64,10 +74,10 @@ class StyleTransferService:
         self.model_error: str | None = None
         self._lock = asyncio.Lock()
         self._mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(
-            1, 3, 1, 1
+            1, RGB_CHANNELS, 1, 1
         )
         self._std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(
-            1, 3, 1, 1
+            1, RGB_CHANNELS, 1, 1
         )
         self._content_layer = 21
         self._style_layers = (0, 5, 10, 19, 28)
@@ -101,7 +111,11 @@ class StyleTransferService:
             self.model_error = str(exc)
             self.model = None
             logger.exception("model loading failed")
-            raise ApiError(3003, "model loading failed", 500) from exc
+            raise ApiError(
+                ErrorCode.MODEL_LOADING_FAILED,
+                "model loading failed",
+                HttpStatus.INTERNAL_SERVER_ERROR,
+            ) from exc
 
     def warmup(self) -> None:
         """用一张小图跑一次完整推理，触发 cudnn autotune 与显存分配。
@@ -112,14 +126,18 @@ class StyleTransferService:
 
         try:
             self.load_model()
-            dummy = Image.new("RGB", (64, 64), (127, 127, 127))
-            content = self._image_to_tensor(dummy, MAX_SIDE_BY_QUALITY["fast"])
+            dummy = Image.new(
+                "RGB",
+                (WARMUP_IMAGE_SIZE, WARMUP_IMAGE_SIZE),
+                (WARMUP_RGB_VALUE, WARMUP_RGB_VALUE, WARMUP_RGB_VALUE),
+            )
+            content = self._image_to_tensor(dummy, MAX_SIDE_BY_QUALITY[DEFAULT_QUALITY])
             style = self._image_to_tensor(
                 dummy,
-                MAX_SIDE_BY_QUALITY["fast"],
+                MAX_SIDE_BY_QUALITY[DEFAULT_QUALITY],
                 target_size=(content.shape[2], content.shape[3]),
             )
-            params = TransferParameters(quality="fast")
+            params = TransferParameters.from_form_values(quality=DEFAULT_QUALITY)
             self._run_optimization(content, style, params)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -130,25 +148,18 @@ class StyleTransferService:
 
     def validate_parameters(
         self,
-        style_strength: int = 70,
-        content_weight: int = 50,
-        smoothness: int = 30,
-        quality: str = "fast",
+        style_strength: int = TransferDefault.STYLE_STRENGTH,
+        content_weight: int = TransferDefault.CONTENT_WEIGHT,
+        smoothness: int = TransferDefault.SMOOTHNESS,
+        quality: str = DEFAULT_QUALITY,
     ) -> TransferParameters:
-        """校验并标准化表单参数。"""
+        """校验并标准化表单参数；保留为兼容测试或外部调用的薄封装。"""
 
-        checks = {
-            "style_strength": style_strength,
-            "content_weight": content_weight,
-            "smoothness": smoothness,
-        }
-        for name, value in checks.items():
-            if value < 0 or value > 100:
-                raise ApiError(3002, f"{name} must between 0 and 100", 400)
-        if quality not in VALID_QUALITIES:
-            raise ApiError(3002, "quality must be fast, normal or hd", 400)
-        return TransferParameters(
-            style_strength, content_weight, smoothness, cast(Quality, quality)
+        return TransferParameters.from_form_values(
+            style_strength=style_strength,
+            content_weight=content_weight,
+            smoothness=smoothness,
+            quality=quality,
         )
 
     async def transfer(
@@ -200,26 +211,36 @@ class StyleTransferService:
         except torch.cuda.OutOfMemoryError as exc:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            raise ApiError(3005, "CUDA out of memory", 503) from exc
+            raise ApiError(
+                ErrorCode.CUDA_OUT_OF_MEMORY,
+                "CUDA out of memory",
+                HttpStatus.SERVICE_UNAVAILABLE,
+            ) from exc
         except ApiError:
             raise
         except RuntimeError as exc:
-            raise ApiError(3004, "style transfer failed", 500) from exc
+            raise ApiError(
+                ErrorCode.STYLE_TRANSFER_FAILED,
+                "style transfer failed",
+                HttpStatus.INTERNAL_SERVER_ERROR,
+            ) from exc
 
         output_image = self._tensor_to_image(output_tensor)
         if params.smoothness > 0:
-            radius = params.smoothness / 100 * 0.8
+            radius = params.smoothness / 100 * SMOOTHNESS_RADIUS_SCALE
             output_image = output_image.filter(
-                ImageFilter.SMOOTH_MORE if radius > 0.45 else ImageFilter.SMOOTH
+                ImageFilter.SMOOTH_MORE
+                if radius > SMOOTHNESS_FILTER_THRESHOLD
+                else ImageFilter.SMOOTH
             )
 
-        result_name = f"result_{uuid.uuid4().hex}.png"
+        result_name = f"{RESULT_FILENAME_PREFIX}{uuid.uuid4().hex}.png"
         result_path = settings.results_dir / result_name
-        output_image.save(result_path, "PNG", optimize=True)
+        output_image.save(result_path, RESULT_IMAGE_FORMAT, optimize=True)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        elapsed_ms = int((time.perf_counter() - start) * MILLISECONDS_PER_SECOND)
         logger.info(
             "style-transfer done: style=%s quality=%s time_ms=%d result=%s",
             style.style_id,
@@ -228,47 +249,73 @@ class StyleTransferService:
             result_name,
         )
         return TransferResult(
-            result_url=f"/static/results/{result_name}",
+            result_url=f"{ApiPath.STATIC_PREFIX}/{StaticSubdir.RESULTS}/{result_name}",
             time_ms=elapsed_ms,
-            parameters=TransferParametersSchema(
-                style_strength=params.style_strength,
-                content_weight=params.content_weight,
-                smoothness=params.smoothness,
-                quality=params.quality,
-            ),
+            parameters=params,
         )
 
     def _read_upload(self, image_bytes: bytes, filename: str) -> Image.Image:
         if not image_bytes:
-            raise ApiError(2001, "image is required", 400)
-        if len(image_bytes) > settings.max_upload_mb * 1024 * 1024:
-            raise ApiError(2004, "image exceeds size limit", 413)
+            raise ApiError(
+                ErrorCode.IMAGE_REQUIRED,
+                "image is required",
+                HttpStatus.BAD_REQUEST,
+            )
+        if (
+            len(image_bytes)
+            > settings.max_upload_mb * ImageConstraint.BYTES_PER_MEBIBYTE
+        ):
+            raise ApiError(
+                ErrorCode.IMAGE_TOO_LARGE,
+                "image exceeds size limit",
+                HttpStatus.PAYLOAD_TOO_LARGE,
+            )
         suffix = Path(filename or "").suffix.lower().lstrip(".")
-        if suffix not in VALID_EXTENSIONS:
-            raise ApiError(2003, "only jpg/png/jpeg supported", 415)
+        if suffix not in SUPPORTED_UPLOAD_EXTENSIONS:
+            raise ApiError(
+                ErrorCode.IMAGE_UNSUPPORTED_TYPE,
+                "only jpg/png/jpeg supported",
+                HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+            )
         try:
             image = Image.open(io.BytesIO(image_bytes))
             # 校验真实图像内容与声明格式一致，防止伪造扩展名。
             image.verify()
         except (UnidentifiedImageError, SyntaxError, OSError, ValueError) as exc:
-            raise ApiError(2002, "image cannot be read", 400) from exc
+            raise ApiError(
+                ErrorCode.IMAGE_UNREADABLE,
+                "image cannot be read",
+                HttpStatus.BAD_REQUEST,
+            ) from exc
         actual_format = (image.format or "").lower()
-        if actual_format not in {"jpeg", "png"}:
-            raise ApiError(2003, "only jpg/png/jpeg supported", 415)
+        if actual_format not in SUPPORTED_IMAGE_FORMATS:
+            raise ApiError(
+                ErrorCode.IMAGE_UNSUPPORTED_TYPE,
+                "only jpg/png/jpeg supported",
+                HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+            )
         # verify() 之后需要重新打开才能继续读取像素。
         try:
-            image = Image.open(io.BytesIO(image_bytes))
-            image = ImageOps.exif_transpose(image).convert("RGB")
+            opened_image = Image.open(io.BytesIO(image_bytes))
+            converted_image = ImageOps.exif_transpose(opened_image).convert("RGB")
         except (UnidentifiedImageError, OSError, ValueError) as exc:
-            raise ApiError(2002, "image cannot be read", 400) from exc
+            raise ApiError(
+                ErrorCode.IMAGE_UNREADABLE,
+                "image cannot be read",
+                HttpStatus.BAD_REQUEST,
+            ) from exc
         if (
-            image.width < 16
-            or image.height < 16
-            or image.width > 12000
-            or image.height > 12000
+            converted_image.width < ImageConstraint.MIN_SIDE
+            or converted_image.height < ImageConstraint.MIN_SIDE
+            or converted_image.width > ImageConstraint.MAX_SIDE
+            or converted_image.height > ImageConstraint.MAX_SIDE
         ):
-            raise ApiError(2005, "invalid image size", 400)
-        return image
+            raise ApiError(
+                ErrorCode.IMAGE_INVALID_SIZE,
+                "invalid image size",
+                HttpStatus.BAD_REQUEST,
+            )
+        return converted_image
 
     def _read_style(self, path: Path) -> Image.Image:
         try:
@@ -276,7 +323,11 @@ class StyleTransferService:
                 return ImageOps.exif_transpose(image).convert("RGB")
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             # 风格预览图损坏或缺失属于服务端资源问题。
-            raise ApiError(3004, "style transfer failed", 500) from exc
+            raise ApiError(
+                ErrorCode.STYLE_TRANSFER_FAILED,
+                "style transfer failed",
+                HttpStatus.INTERNAL_SERVER_ERROR,
+            ) from exc
 
     def _image_to_tensor(
         self,
@@ -287,17 +338,17 @@ class StyleTransferService:
         if target_size is None:
             scale = min(max_side / max(image.width, image.height), 1.0)
             size = (
-                max(16, int(image.height * scale)),
-                max(16, int(image.width * scale)),
+                max(ImageConstraint.MIN_SIDE, int(image.height * scale)),
+                max(ImageConstraint.MIN_SIDE, int(image.width * scale)),
             )
         else:
             size = target_size
         image = image.resize((size[1], size[0]), Image.Resampling.LANCZOS)
-        return TF.to_tensor(image).unsqueeze(0).to(self.device)
+        return cast(torch.Tensor, TF.to_tensor(image).unsqueeze(0).to(self.device))
 
     def _tensor_to_image(self, tensor: torch.Tensor) -> Image.Image:
         tensor = tensor.detach().clamp(0, 1).cpu().squeeze(0)
-        return TF.to_pil_image(tensor)
+        return cast(Image.Image, TF.to_pil_image(tensor))
 
     def _normalize(self, tensor: torch.Tensor) -> torch.Tensor:
         return (tensor - self._mean) / self._std
@@ -348,7 +399,11 @@ class StyleTransferService:
 
         for _ in range(steps):
             if time.perf_counter() > deadline:
-                raise ApiError(3006, "inference timeout", 504)
+                raise ApiError(
+                    ErrorCode.INFERENCE_TIMEOUT,
+                    "inference timeout",
+                    HttpStatus.GATEWAY_TIMEOUT,
+                )
 
             # 注意：不要在 closure 内 clamp 参数。strong_wolfe line search 会
             # 多次评估 closure 并假设目标函数在参数上连续一致，clamp 会篡改
@@ -372,10 +427,10 @@ class StyleTransferService:
                     + style_weight * style_loss
                     + total_variation_weight * tv_loss
                 )
-                loss.backward()
+                cast(Any, loss).backward()
                 return loss
 
-            optimizer.step(closure)
+            cast(Any, optimizer).step(closure)
             with torch.no_grad():
                 generated.clamp_(0, 1)
 
