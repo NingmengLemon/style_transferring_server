@@ -32,11 +32,17 @@ logger = get_logger()
 
 VALID_QUALITIES = {"fast", "normal", "hd"}
 VALID_EXTENSIONS = {"jpg", "jpeg", "png"}
-# 各质量档位的长边像素与 LBFGS 迭代次数。
-# 经 RTX4060 Laptop 实测校准：fast≈1.4s、normal≈2.2s，均落在 2.5s 预算内；
-# hd 作为“尽力而为”的高质量档，可能超过 2.5s，仅在放宽超时时可用。
-MAX_SIDE_BY_QUALITY = {"fast": 384, "normal": 448, "hd": 640}
-ITERATIONS_BY_QUALITY = {"fast": 18, "normal": 22, "hd": 40}
+# 各质量档位的长边像素、外层步数与每步 LBFGS 内迭代次数。
+#
+# 关键：真正决定风格转移充分度的是「closure 评估总次数 ≈ STEPS × LBFGS_MAX_ITER」
+# 以及 LBFGS 的 strong_wolfe line search（拟牛顿法充分收敛），而非 style_weight。
+# 早期实现用 max_iter=1 且无 line search，退化为低效一阶更新，导致「强度拉满也不够」。
+#
+# 经 RTX4060 Laptop 实测校准（含冷启动后稳态，空载 GPU）：
+#   fast≈1.5s、normal≈3.5s、hd≈8s。fast 满足实时预算；normal/hd 为高质量档。
+MAX_SIDE_BY_QUALITY = {"fast": 384, "normal": 448, "hd": 576}
+STEPS_BY_QUALITY = {"fast": 6, "normal": 8, "hd": 10}
+LBFGS_MAX_ITER_BY_QUALITY = {"fast": 8, "normal": 10, "hd": 12}
 
 
 @dataclass(frozen=True)
@@ -326,22 +332,30 @@ class StyleTransferService:
             }
 
         generated = content.clone().requires_grad_(True)
+        # strong_wolfe line search + 较大 max_iter：让拟牛顿法在每个外层 step
+        # 内充分收敛。实测同等耗时下 style_loss 比 max_iter=1 低数倍。
         optimizer = torch.optim.LBFGS(
-            [generated], max_iter=1, history_size=8, line_search_fn=None
+            [generated],
+            max_iter=LBFGS_MAX_ITER_BY_QUALITY[params.quality],
+            history_size=20,
+            line_search_fn="strong_wolfe",
         )
-        style_weight = 1_000_000.0 * max(params.style_strength, 1) / 70
-        content_weight = 10.0 * max(params.content_weight, 1) / 50
-        total_variation_weight = 0.00002 * params.smoothness
-        iterations = ITERATIONS_BY_QUALITY[params.quality]
+        style_weight, content_weight, total_variation_weight = self._loss_weights(
+            params
+        )
+        steps = STEPS_BY_QUALITY[params.quality]
         deadline = time.perf_counter() + settings.timeout_s
 
-        for _ in range(iterations):
+        for _ in range(steps):
             if time.perf_counter() > deadline:
                 raise ApiError(3006, "inference timeout", 504)
 
+            # 注意：不要在 closure 内 clamp 参数。strong_wolfe line search 会
+            # 多次评估 closure 并假设目标函数在参数上连续一致，clamp 会篡改
+            # 参数导致 line search 的函数值/梯度不匹配。改为每个外层 step 结束后
+            # 再 clamp 到合法像素区间。
             def closure() -> torch.Tensor:
                 optimizer.zero_grad(set_to_none=True)
-                generated.data.clamp_(0, 1)
                 generated_features = self._extract_features(generated)
                 content_loss = F.mse_loss(
                     generated_features[self._content_layer],
@@ -362,9 +376,42 @@ class StyleTransferService:
                 return loss
 
             optimizer.step(closure)
+            with torch.no_grad():
+                generated.clamp_(0, 1)
 
         generated.data.clamp_(0, 1)
         return generated.detach()
+
+    def _loss_weights(self, params: TransferParameters) -> tuple[float, float, float]:
+        """把用户参数映射为损失权重。
+
+        关键设计（基于实测）：视觉风格强度主要由 style:content 权重比决定，
+        而单纯提高 style_weight 几乎无效。因此 ``style_strength`` 主要通过
+        **指数级降低 content_weight** 来放大风格——比值才是有效杠杆。
+
+        映射区间经像素偏离度扫描校准（style_weight=3e6、fast 档）：
+        content_weight 的有效动态范围约在 2000（弱风格）到 5（强风格）之间，
+        更低即饱和。因此把 style_strength 0→100 映射到 content_weight 2000→5：
+
+        - strength=0   → content_weight≈2000（强内容约束，接近原图）
+        - strength=50  → content_weight≈100
+        - strength=100 → content_weight≈5（风格充分覆盖）
+
+        早期实现映射到 50→0.5，整段都落在饱和区，导致「强度调了也看不出变化」。
+        ``content_weight`` 参数（0-100）在此基础上做 0.5x~1.5x 线性微调，
+        保留用户对内容保留度的独立控制。
+        """
+
+        strength = min(max(params.style_strength, 0), 100)
+        content = min(max(params.content_weight, 0), 100)
+
+        style_weight = 3_000_000.0
+        # 2000·10^(-2.6·strength/100)：strength 0→100 时 2000→5，跨越有效动态范围。
+        base_content = 2000.0 * (10.0 ** (-2.6 * strength / 100.0))
+        # content_weight 参数（0-100，默认 50）线性缩放 0.5x~1.5x。
+        content_weight = base_content * (0.5 + content / 100.0)
+        total_variation_weight = 0.00002 * params.smoothness
+        return style_weight, content_weight, total_variation_weight
 
     def _total_variation(self, tensor: torch.Tensor) -> torch.Tensor:
         horizontal = torch.mean(torch.abs(tensor[:, :, :, :-1] - tensor[:, :, :, 1:]))
