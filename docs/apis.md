@@ -72,6 +72,7 @@ http://192.168.1.100:8000
 /api/health
 /api/styles
 /api/style-transfer
+/api/custom-style-transfer
 ```
 
 静态资源通过 `/static` 访问：
@@ -172,7 +173,8 @@ http://192.168.1.100:8000
 | --- | --- | --- | --- |
 | `/api/health` | GET | 无请求体 | 服务与模型状态检查 |
 | `/api/styles` | GET | 无请求体 | 获取可选艺术风格列表 |
-| `/api/style-transfer` | POST | `multipart/form-data` | 上传图片并执行风格迁移 |
+| `/api/style-transfer` | POST | `multipart/form-data` | 上传图片并使用内置风格执行风格迁移 |
+| `/api/custom-style-transfer` | POST | `multipart/form-data` | 上传内容图与自定义风格图并执行风格迁移 |
 | `/static/{path}` | GET | 无请求体 | 访问风格预览图或生成结果图 |
 
 ## 6. API 详情
@@ -466,7 +468,106 @@ curl -X POST "http://127.0.0.1:8000/api/style-transfer" \
 }
 ```
 
-## 6.4 访问静态资源
+## 6.4 自定义风格迁移
+
+### 基本信息
+
+```http
+POST /api/custom-style-transfer
+Content-Type: multipart/form-data
+```
+
+上传一张内容图像和一张用户自定义风格图像，服务端直接使用上传的风格图执行风格迁移，并返回生成后的艺术图片 URL。
+
+与 `/api/style-transfer` 的区别：
+
+- `/api/style-transfer` 使用服务端内置风格，需要传 `style_id`。
+- `/api/custom-style-transfer` 使用客户端本次上传的风格图，需要传 `style_image`，不需要传 `style_id`。
+
+### 请求参数
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `image` | file | 是 | 无 | 原图/内容图，支持 jpg、jpeg、png |
+| `style_image` | file | 是 | 无 | 用户上传的风格图，支持 jpg、jpeg、png |
+| `style_strength` | int | 否 | `70` | 风格强度，0-100，越大越接近风格图 |
+| `content_weight` | int | 否 | `50` | 内容保留，0-100，越大越保留原图结构 |
+| `smoothness` | int | 否 | `30` | 细节平滑，0-100，越大细节越柔和 |
+| `quality` | string | 否 | `fast` | 生成质量，可选 `fast`、`normal`、`hd` |
+
+### 参数约束
+
+| 参数 | 允许值 |
+| --- | --- |
+| `style_strength` | 0 到 100 的整数 |
+| `content_weight` | 0 到 100 的整数 |
+| `smoothness` | 0 到 100 的整数 |
+| `quality` | `fast`、`normal`、`hd` |
+| `image` | jpg、jpeg、png 文件 |
+| `style_image` | jpg、jpeg、png 文件 |
+
+### 请求示例：curl
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/custom-style-transfer" \
+  -F "image=@content.png" \
+  -F "style_image=@style.png" \
+  -F "style_strength=70" \
+  -F "content_weight=50" \
+  -F "smoothness=30" \
+  -F "quality=fast"
+```
+
+### 成功响应
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "result_url": "/static/results/result_xxx.png",
+    "time_ms": 1234
+  }
+}
+```
+
+> 若后端实现复用现有 `TransferResponse`，`data` 中也可以额外包含 `parameters` 字段。客户端应至少依赖 `result_url` 和 `time_ms`。
+
+### data 字段说明
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `result_url` | string | 生成图片的相对访问地址 |
+| `time_ms` | int | 本次处理耗时，单位毫秒 |
+| `parameters` | object | 可选；服务端实际使用的参数，若返回则结构同 `/api/style-transfer` |
+
+### 失败响应示例
+
+统一保持现有后端响应风格：
+
+```json
+{
+  "code": 1000,
+  "message": "parameter error",
+  "data": null
+}
+```
+
+### 建议错误码
+
+| code | HTTP 状态码 | 说明 | message 示例 |
+| --- | --- | --- | --- |
+| `1000` | `400` | 参数错误，比如缺少 `image` 或 `style_image` | `parameter error` |
+| `2001` | `400` | 没收到原图或原图内容为空 | `image is required` |
+| `2002` | `400` | 没收到风格图、风格图内容为空或图片无法读取 | `style image is required` / `image cannot be read` |
+| `2003` | `415` | 图片格式不支持 | `only jpg/png/jpeg supported` |
+| `2004` | `413` | 图片过大 | `image exceeds size limit` |
+| `3002` | `400` | 参数范围或枚举值错误 | `style_strength must between 0 and 100` |
+| `3004` | `500` | 风格迁移执行失败 | `style transfer failed` |
+| `3005` | `503` | 结果保存失败或服务端资源异常 | `result save failed` |
+| `3006` | `504` | 推理超时 | `inference timeout` |
+
+## 6.5 访问静态资源
 
 ### 基本信息
 
@@ -578,6 +679,7 @@ POST /api/style-transfer
 GET  /api/health
 GET  /api/styles
 POST /api/style-transfer
+POST /api/custom-style-transfer
 GET  /static/{path}
 ```
 
@@ -598,6 +700,25 @@ quality
 result_url
 time_ms
 parameters
+```
+
+`POST /api/custom-style-transfer` 固定请求字段：
+
+```text
+image
+style_image
+style_strength
+content_weight
+smoothness
+quality
+```
+
+`POST /api/custom-style-transfer` 固定返回字段：
+
+```text
+result_url
+time_ms
+parameters（可选）
 ```
 
 ### 9.2 客户端固定约定
@@ -727,6 +848,7 @@ style-transfer upload read: filename=... size=...B
 GET  /api/health
 GET  /api/styles
 POST /api/style-transfer
+POST /api/custom-style-transfer
 GET  /static/{path}
 ```
 
@@ -734,5 +856,6 @@ GET  /static/{path}
 
 - `/api/health` 用于启动时检查服务状态。
 - `/api/styles` 用于渲染风格选择列表。
-- `/api/style-transfer` 用于生成艺术图片。
+- `/api/style-transfer` 用于使用内置风格生成艺术图片。
+- `/api/custom-style-transfer` 用于使用用户上传的风格图生成艺术图片。
 - `/static/{path}` 用于访问风格预览图和生成结果图。
