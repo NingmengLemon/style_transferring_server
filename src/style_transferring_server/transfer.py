@@ -125,6 +125,8 @@ class StyleTransferService:
         首个真实请求时以约定的错误码暴露。
         """
 
+        previous_request_id = self._current_request_id
+        self._current_request_id = "warmup"
         try:
             self.load_model()
             dummy = Image.new(
@@ -139,13 +141,18 @@ class StyleTransferService:
                 target_size=(content.shape[2], content.shape[3]),
             )
             params = TransferParameters.from_form_values(quality=DEFAULT_QUALITY)
-            self._run_optimization(content, style, params)
+            # 预热只需要触发模型前向、LBFGS、CUDA autotune 与显存分配；
+            # 不调用 _transfer_sync()，也不执行 _tensor_to_image()/save()，避免
+            # 在 data/outputs/static/results 留下无业务意义的预热结果图。
+            _ = self._run_optimization(content, style, params, request_id="warmup")
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             logger.info("model warmup completed")
         except Exception:
             logger.warning("model warmup failed; continuing", exc_info=True)
+        finally:
+            self._current_request_id = previous_request_id
 
     def validate_parameters(
         self,
