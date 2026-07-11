@@ -2,6 +2,8 @@
 
 本项目是课设后端部分，使用 FastAPI + PyTorch + VGG19 实现 HTTP 图像风格迁移服务，并遵守 `docs/风格迁移项目API文档.md` 中的前后端接口约定。
 
+关联项目: [style_transfer_harmonyos](https://github.com/SYYYYYYYYM/style_transfer_harmonyos)
+
 ## 功能
 
 - `GET /api/health`：服务与模型状态检查。
