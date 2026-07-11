@@ -622,7 +622,104 @@ http://<server-ip>:8000 + /static/results/xxx.png
 http://127.0.0.1:8000/static/results/result_8dfb8a6f4c0345f391f1d2d2a47c2a73.png
 ```
 
-## 10. 最小可交付接口
+## 10. Troubleshooting
+
+### 10.1 `/api/style-transfer` 表单字段缺失
+
+如果服务端日志出现类似下面的内容：
+
+```text
+request received: method=POST path=/api/style-transfer query=- client=127.0.0.1 content_type=- content_length=- req=xxxxxx
+request validation failed: method=POST path=/api/style-transfer errors=[{'type': 'missing', 'loc': ('body', 'image'), 'msg': 'Field required', 'input': None}, {'type': 'missing', 'loc': ('body', 'style_id'), 'msg': 'Field required', 'input': None}] req=xxxxxx
+request completed: method=POST path=/api/style-transfer status=400 time_ms=1 req=xxxxxx
+```
+
+通常说明请求还没有进入真正的风格迁移逻辑，而是在 FastAPI 表单解析阶段失败了。重点看这两个日志字段：
+
+```text
+content_type=-
+content_length=-
+```
+
+这表示后端收到的请求里没有可解析的 `multipart/form-data` 请求体，或者请求头/请求体没有被客户端正确发送。此时后端自然解析不到必填字段 `image` 和 `style_id`。
+
+#### 10.1.1 常见原因
+
+1. 客户端没有使用 `multipart/form-data`
+
+   `POST /api/style-transfer` 不是 JSON 接口，不能把图片和参数放在 JSON body 里发送。图片必须作为 multipart 文件字段上传。
+
+2. 客户端手动设置了错误的 `Content-Type`
+
+   multipart 请求头需要包含自动生成的 `boundary`，例如：
+
+   ```http
+   Content-Type: multipart/form-data; boundary=----xxx
+   ```
+
+   如果前端手动写死：
+
+   ```http
+   Content-Type: multipart/form-data
+   ```
+
+   但没有 `boundary`，后端可能无法解析表单。多数网络库会在使用 FormData 或 multipart 上传 API 时自动生成该请求头，因此客户端一般不要手动覆盖 `Content-Type`。
+
+3. 字段名不一致
+
+   服务端固定要求字段名如下：
+
+   ```text
+   image
+   style_id
+   style_strength
+   content_weight
+   smoothness
+   quality
+   ```
+
+   其中 `image` 和 `style_id` 是必填。若客户端使用 `file`、`photo`、`upload`、`styleId` 或 `style` 等字段名，后端都会认为字段缺失。
+
+4. 图片没有作为文件内容上传
+
+   `image` 必须是文件 part，而不是本地路径字符串。错误示例：
+
+   ```text
+   image=/storage/emulated/0/DCIM/photo.jpg
+   ```
+
+   正确做法是读取本地图片文件内容，并以字段名 `image` 上传该文件。
+
+5. 请求体为空或没有挂载到请求上
+
+   如果日志中 `content_length=-`，需要检查客户端是否确实传入了 body，上传 API 的参数位置是否正确，文件 URI 是否有读取权限。
+
+#### 10.1.2 最小正确请求示例
+
+可用 `curl` 对照验证：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/style-transfer" \
+  -F "image=@photo.jpg" \
+  -F "style_id=vangogh" \
+  -F "style_strength=80" \
+  -F "content_weight=50" \
+  -F "smoothness=30" \
+  -F "quality=fast"
+```
+
+如果客户端请求正确，服务端日志中应能看到类似：
+
+```text
+content_type=multipart/form-data; boundary=...
+content_length=xxxxx
+style-transfer endpoint started: style_id=vangogh filename=...
+style-transfer upload read: filename=... size=...B
+```
+
+如果仍然只看到 `image` / `style_id` 缺失，则优先检查客户端的 multipart 构造方式、字段名、文件读取权限和请求头是否被手动覆盖。
+
+## 11. 最小可交付接口
 
 完成完整 App 流程至少需要实现并联通以下接口：
 
