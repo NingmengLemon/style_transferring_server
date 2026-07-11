@@ -130,16 +130,16 @@ curl.exe -X POST "http://127.0.0.1:8000/api/style-transfer" `
 
 ## 参数说明
 
-- `style_strength`：风格强度，范围 0-100，默认 70。**这是控制风格浓淡的主参数**：数值越大，风格覆盖越强、越偏离原图。
-- `content_weight`：内容保留程度，范围 0-100，默认 50。在 `style_strength` 的基础上对内容约束做 0.5x~1.5x 微调。
+- `style_strength`：风格强度，范围 0-100，默认 70。**这是控制风格浓淡的主参数**：数值越大，风格覆盖越强、越偏离原图。当前映射更激进，中段（约 50）即有明显风格化。
+- `content_weight`：内容保留程度，范围 0-100，默认 50。在 `style_strength` 的基础上对内容约束做 0.2x~1.5x 缩放；拉到最低（0）时内容约束进一步压低，得到最极致的风格覆盖。
 - `smoothness`：平滑程度，范围 0-100，默认 30。
 - `quality`：`fast`、`normal`、`hd`，默认 `fast`。质量档越高，优化越充分、风格越细腻，耗时也越长。
 
 ### 风格强度的实现原理
 
-神经风格迁移的视觉强度**主要由 style/content 的损失权重比决定，而非 style_weight 的绝对值**。实测表明单纯抬高 style_weight 几乎不改变结果。因此 `style_strength` 通过**指数级降低 content_weight**（strength 0→100 对应 content_weight 约 2000→5，跨越有效动态范围）来放大风格，这才是有效杠杆。
+神经风格迁移的视觉强度**主要由 style/content 的损失权重比决定，而非 style_weight 的绝对值**。实测表明单纯抬高 style_weight 几乎不改变结果。因此 `style_strength` 通过**指数级降低 content_weight**（strength 0→100 对应 content_weight 约 2000→1，衰减更陡、下限更低）来放大风格，这才是有效杠杆。当前 `style_weight` 提高到 1e7，配合更激进的 content_weight 曲线，使强度拉满、内容保留度拉到最低时风格几乎完全覆盖原图。
 
-此外，优化器采用 LBFGS + `strong_wolfe` line search 并在每个外层 step 内充分迭代，保证风格 loss 真正收敛。早期实现用 `max_iter=1` 且无 line search，优化远未收敛，加上强度只映射到无效的 style_weight，导致「强度拉满风格也不够浓」。
+此外，优化器采用 LBFGS + `strong_wolfe` line search 并在每个外层 step 内充分迭代，保证风格 loss 真正收敛。本次同步上调了外层步数与每步 LBFGS 内迭代次数，让更强的风格权重充分收敛显现。早期实现用 `max_iter=1` 且无 line search，优化远未收敛，加上强度只映射到无效的 style_weight，导致「强度拉满风格也不够浓」。
 
 ## 性能说明
 
@@ -147,22 +147,22 @@ curl.exe -X POST "http://127.0.0.1:8000/api/style-transfer" `
 
 启动时会用一张小图做一次预热推理（warmup），触发 cudnn autotune 与显存分配，从而消除首个真实请求的冷启动尖峰。
 
-各质量档位的分辨率、外层步数与每步 LBFGS 内迭代次数经 RTX4060 Laptop 实测校准。closure 评估总次数（≈步数 × 内迭代）配合 line search 决定收敛充分度。GPU 稳态耗时（不含冷启动，空载 GPU）：
+各质量档位的分辨率、外层步数与每步 LBFGS 内迭代次数经 RTX4060 Laptop 实测校准。closure 评估总次数（≈步数 × 内迭代）配合 line search 决定收敛充分度。为让更激进的风格权重充分收敛显现，本次上调了各档的步数与内迭代，耗时相应增加。GPU 稳态耗时（不含冷启动，空载 GPU）：
 
 | quality | 长边像素 | 外层步数 | LBFGS max_iter | 实测耗时 |
 | ------- | ------- | ------- | -------------- | ------- |
-| `fast`（默认） | 384 | 6 | 8 | ≈1.6s |
-| `normal` | 448 | 8 | 10 | ≈3.4s |
-| `hd` | 576 | 10 | 12 | ≈7.9s |
+| `fast`（默认） | 384 | 8 | 12 | ≈2.5s |
+| `normal` | 448 | 12 | 16 | ≈5s |
+| `hd` | 576 | 16 | 20 | ≈11s |
 
-`fast` 满足实时预算（约 1.6s）。`normal` 与 `hd` 为高质量档，风格更充分细腻但耗时更高；`hd` 明显超过 2.5s，若默认 `timeout_s` 偏小可能触发 3006 超时，可按需调大。
+风格覆盖比之前更强，但单次耗时也更高。`normal` 与 `hd` 尤其明显超过默认 `timeout_s` 的余量较小，若触发 3006 超时可调大 `timeout_s`。
 
 相关配置项（`timeout_s`、`pretrained_vgg`、`warmup` 等）见上文 [配置](#配置) 章节。离线环境可将 `pretrained_vgg` 设为 `false`，但视觉效果会明显下降。
 
 ## 测试
 
 ```powershell
-uv run python -m pytest -q
+uv run pytest -q
 ```
 
 测试为契约级用例，覆盖三个接口的响应格式、状态码与错误分支。为保证离线可跑且快速，测试通过桩替换真实推理，不加载预训练权重、不依赖 WikiArt 数据集与 GPU。

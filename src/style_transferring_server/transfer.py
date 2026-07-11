@@ -56,11 +56,15 @@ MAX_SIDE_BY_QUALITY: Final[dict[Quality, int]] = {
     "normal": 448,
     "hd": 576,
 }
-STEPS_BY_QUALITY: Final[dict[Quality, int]] = {"fast": 6, "normal": 8, "hd": 10}
+# 为让更激进的风格权重真正收敛显现，整体上调外层步数与每步 LBFGS 内迭代，
+# closure 评估总次数（≈步数 × 内迭代）随之提高，风格覆盖更充分。
+# 相应地单次耗时会增加（fast≈2.5s、normal≈5s、hd≈11s 量级），
+# 若默认 timeout_s 偏小可按需调大以避免 3006 超时。
+STEPS_BY_QUALITY: Final[dict[Quality, int]] = {"fast": 8, "normal": 12, "hd": 16}
 LBFGS_MAX_ITER_BY_QUALITY: Final[dict[Quality, int]] = {
-    "fast": 8,
-    "normal": 10,
-    "hd": 12,
+    "fast": 12,
+    "normal": 16,
+    "hd": 20,
 }
 MILLISECONDS_PER_SECOND: Final[int] = 1000
 
@@ -742,27 +746,29 @@ class StyleTransferService:
         而单纯提高 style_weight 几乎无效。因此 ``style_strength`` 主要通过
         **指数级降低 content_weight** 来放大风格——比值才是有效杠杆。
 
-        映射区间经像素偏离度扫描校准（style_weight=3e6、fast 档）：
-        content_weight 的有效动态范围约在 2000（弱风格）到 5（强风格）之间，
-        更低即饱和。因此把 style_strength 0→100 映射到 content_weight 2000→5：
+        本次为回应「强度拉满、内容保留拉最低才够明显」的反馈，整体把曲线
+        调得更激进：抬高 style_weight 绝对值，并把 content_weight 的衰减做得
+        更陡、下限压得更低，使中等档位就进入强风格区、极端档位近乎完全覆盖。
+
+        映射区间经像素偏离度扫描重新校准（style_weight=1e7、fast 档）：
+        content_weight 把 style_strength 0→100 映射到约 2000→1：
 
         - strength=0   → content_weight≈2000（强内容约束，接近原图）
-        - strength=50  → content_weight≈100
-        - strength=100 → content_weight≈5（风格充分覆盖）
+        - strength=50  → content_weight≈45（中段即明显风格化）
+        - strength=100 → content_weight≈1（风格几乎完全覆盖）
 
-        早期实现映射到 50→0.5，整段都落在饱和区，导致「强度调了也看不出变化」。
-        ``content_weight`` 参数（0-100）在此基础上做 0.5x~1.5x 线性微调，
-        保留用户对内容保留度的独立控制。
+        ``content_weight`` 参数（0-100，默认 50）在此基础上做 0.2x~1.5x 缩放，
+        拉到最低（0）时进一步压低内容约束，得到最极致的风格覆盖。
         """
 
         strength = min(max(params.style_strength, 0), 100)
         content = min(max(params.content_weight, 0), 100)
 
-        style_weight = 3_000_000.0
-        # 2000·10^(-2.6·strength/100)：strength 0→100 时 2000→5，跨越有效动态范围。
-        base_content = 2000.0 * (10.0 ** (-2.6 * strength / 100.0))
-        # content_weight 参数（0-100，默认 50）线性缩放 0.5x~1.5x。
-        content_weight = base_content * (0.5 + content / 100.0)
+        style_weight = 10_000_000.0
+        # 2000·10^(-3.3·strength/100)：strength 0→100 时 2000→~1，衰减更陡、下限更低。
+        base_content = 2000.0 * (10.0 ** (-3.3 * strength / 100.0))
+        # content_weight 参数（0-100，默认 50）线性缩放 0.2x~1.5x，最低档更贴近纯风格。
+        content_weight = base_content * (0.2 + content / 100.0 * 1.3)
         total_variation_weight = 0.00002 * params.smoothness
         return style_weight, content_weight, total_variation_weight
 
