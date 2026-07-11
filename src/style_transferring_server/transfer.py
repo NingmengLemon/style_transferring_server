@@ -73,6 +73,7 @@ class StyleTransferService:
         self.model: nn.Sequential | None = None
         self.model_error: str | None = None
         self._lock = asyncio.Lock()
+        self._current_request_id = "-"
         self._mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(
             1, RGB_CHANNELS, 1, 1
         )
@@ -168,12 +169,29 @@ class StyleTransferService:
         filename: str,
         style: StyleInfo,
         params: TransferParameters,
+        request_id: str = "-",
     ) -> TransferResult:
         """异步串行执行一次风格迁移，避免显存并发峰值。"""
 
+        logger.info(
+            "style-transfer queue enter: style=%s quality=%s req=%s",
+            style.style_id,
+            params.quality,
+            request_id,
+        )
+        lock_wait_start = time.perf_counter()
         async with self._lock:
+            lock_wait_ms = int(
+                (time.perf_counter() - lock_wait_start) * MILLISECONDS_PER_SECOND
+            )
+            logger.info(
+                "style-transfer lock acquired: wait_ms=%d style=%s req=%s",
+                lock_wait_ms,
+                style.style_id,
+                request_id,
+            )
             return await asyncio.to_thread(
-                self._transfer_sync, image_bytes, filename, style, params
+                self._transfer_sync, image_bytes, filename, style, params, request_id
             )
 
     def _transfer_sync(
@@ -182,33 +200,88 @@ class StyleTransferService:
         filename: str,
         style: StyleInfo,
         params: TransferParameters,
+        request_id: str = "-",
     ) -> TransferResult:
         start = time.perf_counter()
+        logger.info(
+            "style-transfer sync started: filename=%s req=%s", filename, request_id
+        )
         self.load_model()
         assert self.model is not None
 
         logger.info(
-            "style-transfer start: style=%s quality=%s params=(%d,%d,%d) size=%dB",
+            "style-transfer start: style=%s quality=%s params=(%d,%d,%d) size=%dB req=%s",
             style.style_id,
             params.quality,
             params.style_strength,
             params.content_weight,
             params.smoothness,
             len(image_bytes),
+            request_id,
         )
 
-        content_image = self._read_upload(image_bytes, filename)
-        style_image = self._read_style(style.image_path)
+        logger.info(
+            "style-transfer step: validating upload filename=%s req=%s",
+            filename,
+            request_id,
+        )
+        content_image = self._read_upload(image_bytes, filename, request_id=request_id)
+        logger.info(
+            "style-transfer step done: upload validated image_size=%dx%d req=%s",
+            content_image.width,
+            content_image.height,
+            request_id,
+        )
+        logger.info(
+            "style-transfer step: reading style image path=%s req=%s",
+            style.image_path,
+            request_id,
+        )
+        style_image = self._read_style(style.image_path, request_id=request_id)
+        logger.info(
+            "style-transfer step done: style image loaded image_size=%dx%d req=%s",
+            style_image.width,
+            style_image.height,
+            request_id,
+        )
         max_side = MAX_SIDE_BY_QUALITY[params.quality]
+        logger.info(
+            "style-transfer step: converting content image to tensor max_side=%d req=%s",
+            max_side,
+            request_id,
+        )
         content_tensor = self._image_to_tensor(content_image, max_side)
         _, _, height, width = content_tensor.shape
+        logger.info(
+            "style-transfer step done: content tensor ready shape=%s device=%s req=%s",
+            tuple(content_tensor.shape),
+            content_tensor.device,
+            request_id,
+        )
+        logger.info(
+            "style-transfer step: converting style image to tensor target_size=%dx%d req=%s",
+            height,
+            width,
+            request_id,
+        )
         style_tensor = self._image_to_tensor(
             style_image, max_side, target_size=(height, width)
         )
+        logger.info(
+            "style-transfer step done: style tensor ready shape=%s device=%s req=%s",
+            tuple(style_tensor.shape),
+            style_tensor.device,
+            request_id,
+        )
 
         try:
+            logger.info("style-transfer step: optimization started req=%s", request_id)
+            self._current_request_id = request_id
             output_tensor = self._run_optimization(content_tensor, style_tensor, params)
         except torch.cuda.OutOfMemoryError as exc:
+            logger.exception(
+                "style-transfer failed: cuda out of memory req=%s", request_id
+            )
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             raise ApiError(
@@ -219,15 +292,34 @@ class StyleTransferService:
         except ApiError:
             raise
         except RuntimeError as exc:
+            logger.exception("style-transfer failed: runtime error req=%s", request_id)
             raise ApiError(
                 ErrorCode.STYLE_TRANSFER_FAILED,
                 "style transfer failed",
                 HttpStatus.INTERNAL_SERVER_ERROR,
             ) from exc
 
+        logger.info(
+            "style-transfer step done: optimization completed req=%s", request_id
+        )
+        logger.info(
+            "style-transfer step: converting output tensor to image req=%s", request_id
+        )
         output_image = self._tensor_to_image(output_tensor)
+        logger.info(
+            "style-transfer step done: output image ready image_size=%dx%d req=%s",
+            output_image.width,
+            output_image.height,
+            request_id,
+        )
         if params.smoothness > 0:
             radius = params.smoothness / 100 * SMOOTHNESS_RADIUS_SCALE
+            logger.info(
+                "style-transfer step: applying smoothness filter smoothness=%d radius=%.3f req=%s",
+                params.smoothness,
+                radius,
+                request_id,
+            )
             output_image = output_image.filter(
                 ImageFilter.SMOOTH_MORE
                 if radius > SMOOTHNESS_FILTER_THRESHOLD
@@ -236,17 +328,21 @@ class StyleTransferService:
 
         result_name = f"{RESULT_FILENAME_PREFIX}{uuid.uuid4().hex}.png"
         result_path = settings.results_dir / result_name
+        logger.info(
+            "style-transfer step: saving output path=%s req=%s", result_path, request_id
+        )
         output_image.save(result_path, RESULT_IMAGE_FORMAT, optimize=True)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         elapsed_ms = int((time.perf_counter() - start) * MILLISECONDS_PER_SECOND)
         logger.info(
-            "style-transfer done: style=%s quality=%s time_ms=%d result=%s",
+            "style-transfer done: style=%s quality=%s time_ms=%d result=%s req=%s",
             style.style_id,
             params.quality,
             elapsed_ms,
             result_name,
+            request_id,
         )
         return TransferResult(
             result_url=f"{ApiPath.STATIC_PREFIX}/{StaticSubdir.RESULTS}/{result_name}",
@@ -254,8 +350,17 @@ class StyleTransferService:
             parameters=params,
         )
 
-    def _read_upload(self, image_bytes: bytes, filename: str) -> Image.Image:
+    def _read_upload(
+        self, image_bytes: bytes, filename: str, request_id: str = "-"
+    ) -> Image.Image:
+        logger.info(
+            "upload validation started: filename=%s size=%dB req=%s",
+            filename,
+            len(image_bytes),
+            request_id,
+        )
         if not image_bytes:
+            logger.warning("upload validation failed: empty image req=%s", request_id)
             raise ApiError(
                 ErrorCode.IMAGE_REQUIRED,
                 "image is required",
@@ -265,6 +370,12 @@ class StyleTransferService:
             len(image_bytes)
             > settings.max_upload_mb * ImageConstraint.BYTES_PER_MEBIBYTE
         ):
+            logger.warning(
+                "upload validation failed: image too large size=%dB max_mb=%d req=%s",
+                len(image_bytes),
+                settings.max_upload_mb,
+                request_id,
+            )
             raise ApiError(
                 ErrorCode.IMAGE_TOO_LARGE,
                 "image exceeds size limit",
@@ -272,6 +383,12 @@ class StyleTransferService:
             )
         suffix = Path(filename or "").suffix.lower().lstrip(".")
         if suffix not in SUPPORTED_UPLOAD_EXTENSIONS:
+            logger.warning(
+                "upload validation failed: unsupported extension filename=%s suffix=%s req=%s",
+                filename,
+                suffix or "-",
+                request_id,
+            )
             raise ApiError(
                 ErrorCode.IMAGE_UNSUPPORTED_TYPE,
                 "only jpg/png/jpeg supported",
@@ -282,13 +399,30 @@ class StyleTransferService:
             # 校验真实图像内容与声明格式一致，防止伪造扩展名。
             image.verify()
         except (UnidentifiedImageError, SyntaxError, OSError, ValueError) as exc:
+            logger.warning(
+                "upload validation failed: image verify failed filename=%s req=%s",
+                filename,
+                request_id,
+            )
             raise ApiError(
                 ErrorCode.IMAGE_UNREADABLE,
                 "image cannot be read",
                 HttpStatus.BAD_REQUEST,
             ) from exc
         actual_format = (image.format or "").lower()
+        logger.info(
+            "upload validation detected format: filename=%s format=%s req=%s",
+            filename,
+            actual_format or "-",
+            request_id,
+        )
         if actual_format not in SUPPORTED_IMAGE_FORMATS:
+            logger.warning(
+                "upload validation failed: unsupported image format filename=%s format=%s req=%s",
+                filename,
+                actual_format or "-",
+                request_id,
+            )
             raise ApiError(
                 ErrorCode.IMAGE_UNSUPPORTED_TYPE,
                 "only jpg/png/jpeg supported",
@@ -299,6 +433,11 @@ class StyleTransferService:
             opened_image = Image.open(io.BytesIO(image_bytes))
             converted_image = ImageOps.exif_transpose(opened_image).convert("RGB")
         except (UnidentifiedImageError, OSError, ValueError) as exc:
+            logger.warning(
+                "upload validation failed: image reopen failed filename=%s req=%s",
+                filename,
+                request_id,
+            )
             raise ApiError(
                 ErrorCode.IMAGE_UNREADABLE,
                 "image cannot be read",
@@ -310,19 +449,45 @@ class StyleTransferService:
             or converted_image.width > ImageConstraint.MAX_SIDE
             or converted_image.height > ImageConstraint.MAX_SIDE
         ):
+            logger.warning(
+                "upload validation failed: invalid dimensions width=%d height=%d min=%d max=%d req=%s",
+                converted_image.width,
+                converted_image.height,
+                ImageConstraint.MIN_SIDE,
+                ImageConstraint.MAX_SIDE,
+                request_id,
+            )
             raise ApiError(
                 ErrorCode.IMAGE_INVALID_SIZE,
                 "invalid image size",
                 HttpStatus.BAD_REQUEST,
             )
+        logger.info(
+            "upload validation completed: filename=%s width=%d height=%d req=%s",
+            filename,
+            converted_image.width,
+            converted_image.height,
+            request_id,
+        )
         return converted_image
 
-    def _read_style(self, path: Path) -> Image.Image:
+    def _read_style(self, path: Path, request_id: str = "-") -> Image.Image:
         try:
             with Image.open(path) as image:
-                return ImageOps.exif_transpose(image).convert("RGB")
+                converted_image = ImageOps.exif_transpose(image).convert("RGB")
+                logger.info(
+                    "style image loaded: path=%s width=%d height=%d req=%s",
+                    path,
+                    converted_image.width,
+                    converted_image.height,
+                    request_id,
+                )
+                return converted_image
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             # 风格预览图损坏或缺失属于服务端资源问题。
+            logger.exception(
+                "style image load failed: path=%s req=%s", path, request_id
+            )
             raise ApiError(
                 ErrorCode.STYLE_TRANSFER_FAILED,
                 "style transfer failed",
@@ -372,11 +537,29 @@ class StyleTransferService:
         return gram / (channels * height * width)
 
     def _run_optimization(
-        self, content: torch.Tensor, style: torch.Tensor, params: TransferParameters
+        self,
+        content: torch.Tensor,
+        style: torch.Tensor,
+        params: TransferParameters,
+        request_id: str | None = None,
     ) -> torch.Tensor:
+        request_id = request_id or self._current_request_id
+        logger.info(
+            "optimization setup started: content_shape=%s style_shape=%s quality=%s req=%s",
+            tuple(content.shape),
+            tuple(style.shape),
+            params.quality,
+            request_id,
+        )
         with torch.no_grad():
             content_features = self._extract_features(content)
             style_features = self._extract_features(style)
+            logger.info(
+                "optimization features extracted: content_layers=%s style_layers=%s req=%s",
+                sorted(content_features.keys()),
+                sorted(style_features.keys()),
+                request_id,
+            )
             style_grams = {
                 layer: self._gram_matrix(style_features[layer])
                 for layer in self._style_layers
@@ -395,10 +578,28 @@ class StyleTransferService:
             params
         )
         steps = STEPS_BY_QUALITY[params.quality]
+        logger.info(
+            "optimization configured: steps=%d lbfgs_max_iter=%d style_weight=%.3f content_weight=%.3f tv_weight=%.6f timeout_s=%d req=%s",
+            steps,
+            LBFGS_MAX_ITER_BY_QUALITY[params.quality],
+            style_weight,
+            content_weight,
+            total_variation_weight,
+            settings.timeout_s,
+            request_id,
+        )
         deadline = time.perf_counter() + settings.timeout_s
+        optimization_start = time.perf_counter()
 
-        for _ in range(steps):
+        for step_index in range(steps):
+            step_start = time.perf_counter()
             if time.perf_counter() > deadline:
+                logger.warning(
+                    "optimization timeout before step: step=%d/%d req=%s",
+                    step_index + 1,
+                    steps,
+                    request_id,
+                )
                 raise ApiError(
                     ErrorCode.INFERENCE_TIMEOUT,
                     "inference timeout",
@@ -433,8 +634,22 @@ class StyleTransferService:
             cast(Any, optimizer).step(closure)
             with torch.no_grad():
                 generated.clamp_(0, 1)
+            step_elapsed_ms = int(
+                (time.perf_counter() - step_start) * MILLISECONDS_PER_SECOND
+            )
+            logger.info(
+                "optimization step completed: step=%d/%d time_ms=%d req=%s",
+                step_index + 1,
+                steps,
+                step_elapsed_ms,
+                request_id,
+            )
 
         generated.data.clamp_(0, 1)
+        elapsed_ms = int(
+            (time.perf_counter() - optimization_start) * MILLISECONDS_PER_SECOND
+        )
+        logger.info("optimization completed: time_ms=%d req=%s", elapsed_ms, request_id)
         return generated.detach()
 
     def _loss_weights(self, params: TransferParameters) -> tuple[float, float, float]:

@@ -49,16 +49,30 @@ def error_response(code: int, message: str, http_status: int) -> JSONResponse:
     )
 
 
-async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
+async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     """FastAPI 业务异常处理器。"""
 
+    logger.warning(
+        "api error handled: method=%s path=%s code=%d http_status=%d message=%s req=%s",
+        request.method,
+        request.url.path,
+        exc.code,
+        exc.http_status,
+        exc.message,
+        getattr(request.state, "request_id", "-"),
+    )
     return error_response(exc.code, exc.message, exc.http_status)
 
 
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """兜底异常处理器，避免返回非约定格式，同时不向客户端泄漏内部细节。"""
 
-    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+    logger.exception(
+        "unhandled error: method=%s path=%s req=%s",
+        request.method,
+        request.url.path,
+        getattr(request.state, "request_id", "-"),
+    )
     return error_response(
         ErrorCode.GENERIC,
         "internal server error",

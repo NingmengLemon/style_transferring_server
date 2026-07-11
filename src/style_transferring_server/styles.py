@@ -95,19 +95,38 @@ class StyleRegistry:
         from .config import ensure_runtime_dirs
 
         ensure_runtime_dirs(self._config)
+        logger.info("style registry loading: config=%s", self._config.styles_config)
         candidates = load_style_candidates(self._config.styles_config)
         csv_path = self.wikiart_dir / "classes.csv"
+        logger.info("style registry reading wikiart metadata: csv=%s", csv_path)
         rows = list(self._iter_csv_rows(csv_path)) if csv_path.exists() else []
         if not rows:
             logger.warning("wikiart classes.csv not found under %s", self.wikiart_dir)
 
         styles: dict[str, StyleInfo] = {}
         for candidate in candidates:
+            logger.info(
+                "style registry resolving candidate: style_id=%s artist=%s query=%s fallback_genre=%s",
+                candidate.style_id,
+                candidate.artist,
+                candidate.query,
+                candidate.fallback_genre,
+            )
             image_path = self._find_image(rows, candidate)
             if image_path is None:
                 logger.warning("no matching image for style '%s'", candidate.style_id)
                 continue
+            logger.info(
+                "style registry matched image: style_id=%s image_path=%s",
+                candidate.style_id,
+                image_path,
+            )
             preview_url = self._ensure_preview(candidate.style_id, image_path)
+            logger.info(
+                "style registry preview ready: style_id=%s preview_url=%s",
+                candidate.style_id,
+                preview_url,
+            )
             styles[candidate.style_id] = StyleInfo(
                 style_id=candidate.style_id,
                 name=candidate.name,
@@ -155,7 +174,16 @@ class StyleRegistry:
             f"{ApiPath.STATIC_PREFIX}/{StaticSubdir.STYLES}/{preview_filename}"
         )
         if preview_path.exists():
+            logger.info(
+                "style preview reused: style_id=%s path=%s", style_id, preview_path
+            )
             return preview_url
+        logger.info(
+            "style preview building: style_id=%s source=%s target=%s",
+            style_id,
+            source_path,
+            preview_path,
+        )
         try:
             with Image.open(source_path) as opened_image:
                 converted_image = ImageOps.exif_transpose(opened_image).convert("RGB")
@@ -171,6 +199,7 @@ class StyleRegistry:
         except Exception:
             logger.exception("failed to build preview for '%s', copying raw", style_id)
             shutil.copyfile(source_path, preview_path)
+        logger.info("style preview built: style_id=%s path=%s", style_id, preview_path)
         return preview_url
 
 
