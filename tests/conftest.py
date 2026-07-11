@@ -67,6 +67,7 @@ def fast_transfer(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         content: torch.Tensor,
         _style: torch.Tensor,
         _params: object,
+        request_id: str = "-",
     ) -> torch.Tensor:
         # 直接返回内容张量，跳过 LBFGS 迭代。
         return content.detach()

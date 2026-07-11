@@ -19,6 +19,7 @@ class ApiPath(StrEnum):
     HEALTH = "/api/health"
     STYLES = "/api/styles"
     STYLE_TRANSFER = "/api/style-transfer"
+    CUSTOM_STYLE_TRANSFER = "/api/custom-style-transfer"
 
 
 class StaticSubdir(StrEnum):

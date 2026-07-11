@@ -127,3 +127,75 @@ def test_missing_image_field(client: TestClient) -> None:
     # 缺少必填 image 字段，走表单校验统一映射为 1000。
     assert resp.status_code == 400
     assert resp.json()["code"] == 1000
+
+
+def test_custom_style_transfer_success(
+    client: TestClient, jpeg_bytes: bytes, png_bytes: bytes
+) -> None:
+    resp = client.post(
+        "/api/custom-style-transfer",
+        files={
+            "image": ("content.jpg", jpeg_bytes, "image/jpeg"),
+            "style_image": ("style.png", png_bytes, "image/png"),
+        },
+        data={
+            "style_strength": "75",
+            "content_weight": "55",
+            "smoothness": "25",
+            "quality": "fast",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == 0
+    data = body["data"]
+    assert data["result_url"].startswith("/static/results/")
+    assert isinstance(data["time_ms"], int)
+    assert data["parameters"] == {
+        "style_strength": 75,
+        "content_weight": 55,
+        "smoothness": 25,
+        "quality": "fast",
+    }
+
+
+def test_custom_style_transfer_missing_style_image(
+    client: TestClient, jpeg_bytes: bytes
+) -> None:
+    resp = client.post(
+        "/api/custom-style-transfer",
+        files={"image": ("content.jpg", jpeg_bytes, "image/jpeg")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 1000
+
+
+def test_custom_style_transfer_empty_style_image(
+    client: TestClient, jpeg_bytes: bytes
+) -> None:
+    resp = client.post(
+        "/api/custom-style-transfer",
+        files={
+            "image": ("content.jpg", jpeg_bytes, "image/jpeg"),
+            "style_image": ("style.jpg", b"", "image/jpeg"),
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == 2002
+    assert body["message"] == "style image is required"
+
+
+def test_custom_style_transfer_invalid_quality(
+    client: TestClient, jpeg_bytes: bytes, png_bytes: bytes
+) -> None:
+    resp = client.post(
+        "/api/custom-style-transfer",
+        files={
+            "image": ("content.jpg", jpeg_bytes, "image/jpeg"),
+            "style_image": ("style.png", png_bytes, "image/png"),
+        },
+        data={"quality": "ultra"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 3002

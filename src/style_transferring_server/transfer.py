@@ -178,11 +178,51 @@ class StyleTransferService:
         params: TransferParameters,
         request_id: str = "-",
     ) -> TransferResult:
-        """异步串行执行一次风格迁移，避免显存并发峰值。"""
+        """异步串行执行一次内置风格迁移，避免显存并发峰值。"""
 
+        return await self._run_serialized_transfer(
+            image_bytes=image_bytes,
+            filename=filename,
+            style=style,
+            params=params,
+            request_id=request_id,
+        )
+
+    async def transfer_with_custom_style(
+        self,
+        image_bytes: bytes,
+        filename: str,
+        style_image_bytes: bytes,
+        style_filename: str,
+        params: TransferParameters,
+        request_id: str = "-",
+    ) -> TransferResult:
+        """异步串行执行一次用户上传风格图的风格迁移。"""
+
+        return await self._run_serialized_transfer(
+            image_bytes=image_bytes,
+            filename=filename,
+            style=None,
+            params=params,
+            request_id=request_id,
+            style_image_bytes=style_image_bytes,
+            style_filename=style_filename,
+        )
+
+    async def _run_serialized_transfer(
+        self,
+        image_bytes: bytes,
+        filename: str,
+        style: StyleInfo | None,
+        params: TransferParameters,
+        request_id: str,
+        style_image_bytes: bytes | None = None,
+        style_filename: str | None = None,
+    ) -> TransferResult:
+        style_label = style.style_id if style is not None else "custom"
         logger.info(
             "style-transfer queue enter: style=%s quality=%s req=%s",
-            style.style_id,
+            style_label,
             params.quality,
             request_id,
         )
@@ -194,20 +234,29 @@ class StyleTransferService:
             logger.info(
                 "style-transfer lock acquired: wait_ms=%d style=%s req=%s",
                 lock_wait_ms,
-                style.style_id,
+                style_label,
                 request_id,
             )
             return await asyncio.to_thread(
-                self._transfer_sync, image_bytes, filename, style, params, request_id
+                self._transfer_sync,
+                image_bytes,
+                filename,
+                style,
+                params,
+                request_id,
+                style_image_bytes,
+                style_filename,
             )
 
     def _transfer_sync(
         self,
         image_bytes: bytes,
         filename: str,
-        style: StyleInfo,
+        style: StyleInfo | None,
         params: TransferParameters,
         request_id: str = "-",
+        style_image_bytes: bytes | None = None,
+        style_filename: str | None = None,
     ) -> TransferResult:
         start = time.perf_counter()
         logger.info(
@@ -216,9 +265,10 @@ class StyleTransferService:
         self.load_model()
         assert self.model is not None
 
+        style_label = style.style_id if style is not None else "custom"
         logger.info(
             "style-transfer start: style=%s quality=%s params=(%d,%d,%d) size=%dB req=%s",
-            style.style_id,
+            style_label,
             params.quality,
             params.style_strength,
             params.content_weight,
@@ -239,12 +289,32 @@ class StyleTransferService:
             content_image.height,
             request_id,
         )
-        logger.info(
-            "style-transfer step: reading style image path=%s req=%s",
-            style.image_path,
-            request_id,
-        )
-        style_image = self._read_style(style.image_path, request_id=request_id)
+        if style is None:
+            if style_image_bytes is None:
+                raise ApiError(
+                    ErrorCode.IMAGE_UNREADABLE,
+                    "style image is required",
+                    HttpStatus.BAD_REQUEST,
+                )
+            style_filename = style_filename or "style.jpg"
+            logger.info(
+                "style-transfer step: validating custom style upload filename=%s req=%s",
+                style_filename,
+                request_id,
+            )
+            style_image = self._read_upload(
+                style_image_bytes,
+                style_filename,
+                request_id=request_id,
+                empty_message="style image is required",
+            )
+        else:
+            logger.info(
+                "style-transfer step: reading style image path=%s req=%s",
+                style.image_path,
+                request_id,
+            )
+            style_image = self._read_style(style.image_path, request_id=request_id)
         logger.info(
             "style-transfer step done: style image loaded image_size=%dx%d req=%s",
             style_image.width,
@@ -345,7 +415,7 @@ class StyleTransferService:
         elapsed_ms = int((time.perf_counter() - start) * MILLISECONDS_PER_SECOND)
         logger.info(
             "style-transfer done: style=%s quality=%s time_ms=%d result=%s req=%s",
-            style.style_id,
+            style_label,
             params.quality,
             elapsed_ms,
             result_name,
@@ -358,7 +428,11 @@ class StyleTransferService:
         )
 
     def _read_upload(
-        self, image_bytes: bytes, filename: str, request_id: str = "-"
+        self,
+        image_bytes: bytes,
+        filename: str,
+        request_id: str = "-",
+        empty_message: str = "image is required",
     ) -> Image.Image:
         logger.info(
             "upload validation started: filename=%s size=%dB req=%s",
@@ -369,8 +443,10 @@ class StyleTransferService:
         if not image_bytes:
             logger.warning("upload validation failed: empty image req=%s", request_id)
             raise ApiError(
-                ErrorCode.IMAGE_REQUIRED,
-                "image is required",
+                ErrorCode.IMAGE_REQUIRED
+                if empty_message == "image is required"
+                else ErrorCode.IMAGE_UNREADABLE,
+                empty_message,
                 HttpStatus.BAD_REQUEST,
             )
         if (

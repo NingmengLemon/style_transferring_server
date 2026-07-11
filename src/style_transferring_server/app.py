@@ -211,17 +211,19 @@ def create_app() -> FastAPI:
         )
         return StylesResponse(data=StylesData(styles=items))
 
+    error_responses: dict[int | str, dict[str, object]] = {
+        int(HttpStatus.BAD_REQUEST): {"model": ErrorResponse},
+        int(HttpStatus.PAYLOAD_TOO_LARGE): {"model": ErrorResponse},
+        int(HttpStatus.UNSUPPORTED_MEDIA_TYPE): {"model": ErrorResponse},
+        int(HttpStatus.INTERNAL_SERVER_ERROR): {"model": ErrorResponse},
+        int(HttpStatus.SERVICE_UNAVAILABLE): {"model": ErrorResponse},
+        int(HttpStatus.GATEWAY_TIMEOUT): {"model": ErrorResponse},
+    }
+
     @app.post(
         ApiPath.STYLE_TRANSFER,
         response_model=TransferResponse,
-        responses={
-            HttpStatus.BAD_REQUEST: {"model": ErrorResponse},
-            HttpStatus.PAYLOAD_TOO_LARGE: {"model": ErrorResponse},
-            HttpStatus.UNSUPPORTED_MEDIA_TYPE: {"model": ErrorResponse},
-            HttpStatus.INTERNAL_SERVER_ERROR: {"model": ErrorResponse},
-            HttpStatus.SERVICE_UNAVAILABLE: {"model": ErrorResponse},
-            HttpStatus.GATEWAY_TIMEOUT: {"model": ErrorResponse},
-        },
+        responses=error_responses,
         summary="执行图像风格迁移",
     )
     async def style_transfer(
@@ -296,6 +298,81 @@ def create_app() -> FastAPI:
         )
         logger.info(
             "style-transfer endpoint completed: result_url=%s time_ms=%d req=%s",
+            result.result_url,
+            result.time_ms,
+            request_id,
+        )
+        return TransferResponse(data=result)
+
+    @app.post(
+        ApiPath.CUSTOM_STYLE_TRANSFER,
+        response_model=TransferResponse,
+        responses=error_responses,
+        summary="使用自定义风格图执行图像风格迁移",
+    )
+    async def custom_style_transfer(
+        request: Request,
+        image: UploadFile = File(..., description="内容图像（jpg/jpeg/png）"),
+        style_image: UploadFile = File(
+            ..., description="自定义风格图像（jpg/jpeg/png）"
+        ),
+        style_strength: int = Form(
+            TransferDefault.STYLE_STRENGTH,
+            description="风格强度 0-100",
+        ),
+        content_weight: int = Form(
+            TransferDefault.CONTENT_WEIGHT,
+            description="内容保留程度 0-100",
+        ),
+        smoothness: int = Form(
+            TransferDefault.SMOOTHNESS,
+            description="细节平滑程度 0-100",
+        ),
+        quality: str = Form(DEFAULT_QUALITY, description="生成质量：fast/normal/hd"),
+    ) -> TransferResponse:
+        request_id = getattr(request.state, "request_id", "-")
+        filename = image.filename or "upload.jpg"
+        style_filename = style_image.filename or "style.jpg"
+        logger.info(
+            "custom-style-transfer endpoint started: filename=%s style_filename=%s content_type=%s style_content_type=%s params=(%d,%d,%d,%s) req=%s",
+            filename,
+            style_filename,
+            image.content_type or "-",
+            style_image.content_type or "-",
+            style_strength,
+            content_weight,
+            smoothness,
+            quality,
+            request_id,
+        )
+        params = TransferParameters.from_form_values(
+            style_strength, content_weight, smoothness, quality
+        )
+        logger.info(
+            "custom-style-transfer parameters validated: params=%s req=%s",
+            params.model_dump(),
+            request_id,
+        )
+        data = await image.read()
+        style_data = await style_image.read()
+        logger.info(
+            "custom-style-transfer uploads read: filename=%s size=%dB style_filename=%s style_size=%dB req=%s",
+            filename,
+            len(data),
+            style_filename,
+            len(style_data),
+            request_id,
+        )
+        result = await style_transfer_service.transfer_with_custom_style(
+            data,
+            filename,
+            style_data,
+            style_filename,
+            params,
+            request_id=request_id,
+        )
+        logger.info(
+            "custom-style-transfer endpoint completed: result_url=%s time_ms=%d req=%s",
             result.result_url,
             result.time_ms,
             request_id,
