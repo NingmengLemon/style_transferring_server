@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ExceptionHandler
 
 from .config import ensure_runtime_dirs, settings
@@ -148,6 +149,9 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(
         RequestValidationError, cast(ExceptionHandler, validation_error_handler)
+    )
+    app.add_exception_handler(
+        StarletteHTTPException, cast(ExceptionHandler, http_error_handler)
     )
     ensure_runtime_dirs()
     app.mount(
@@ -380,6 +384,24 @@ def create_app() -> FastAPI:
         return TransferResponse(data=result)
 
     return app
+
+
+async def http_error_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    """将未匹配到已有端点的请求固定映射为 418。"""
+
+    if exc.status_code == 404:
+        logger.warning(
+            "request endpoint not found: method=%s path=%s req=%s",
+            request.method,
+            request.url.path,
+            getattr(request.state, "request_id", "-"),
+        )
+        return error_response(
+            ErrorCode.GENERIC, "YOU ARE A TEAPOT", HttpStatus.IM_A_TEAPOT
+        )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 async def validation_error_handler(

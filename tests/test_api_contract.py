@@ -199,3 +199,11 @@ def test_custom_style_transfer_invalid_quality(
     )
     assert resp.status_code == 400
     assert resp.json()["code"] == 3002
+
+
+def test_unmatched_endpoint_returns_418(client: TestClient) -> None:
+    resp = client.get("/api/does-not-exist")
+    assert resp.status_code == 418
+    body = resp.json()
+    assert body["code"] == 1000
+    assert body["data"] is None

@@ -57,6 +57,8 @@ class HttpStatus(IntEnum):
     SERVICE_UNAVAILABLE = 503
     GATEWAY_TIMEOUT = 504
 
+    IM_A_TEAPOT = 418
+
 
 class ImageConstraint(IntEnum):
     """上传图片约束。"""
